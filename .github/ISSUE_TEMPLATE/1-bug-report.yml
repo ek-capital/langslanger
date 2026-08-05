@@ -1,7 +1,7 @@
 name: 🐞 Bug report
-description: Report a bug to help us reproduce and fix it.
+description: Report a reproducible LangSlanger bug.
 title: "[Bug] "
-labels: ['Bug']
+labels: ["bug"]
 
 body:
 - type: checkboxes
@@ -9,9 +9,8 @@ body:
     label: Checklist
     options:
       - label: I searched related issues but found no solution.
-      - label: The bug persists in the latest version.
+      - label: The bug persists on the latest LangSlanger main branch.
       - label: Issues without environment info and a minimal reproducible demo are hard to resolve and may receive no feedback.
-      - label: If this is not a bug report but a general question, please start a discussion at https://github.com/sgl-project/sglang/discussions. Otherwise, it will be closed.
       - label: Please use English. Otherwise, it will be closed.
 - type: textarea
   attributes:
@@ -29,7 +28,7 @@ body:
 - type: textarea
   attributes:
     label: Environment
-    description: Run `python3 -m sglang.check_env` and paste output here. Issues without this will be closed.
+    description: Run `python3 -m sglang.check_env` and paste the output, plus the LangSlanger Git commit.
     placeholder: Paste environment output here.
   validations:
     required: true

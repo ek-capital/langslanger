@@ -83,7 +83,7 @@ ARG GPU_ARCH=gfx950
 ENV GPU_ARCH_LIST=${GPU_ARCH%-*}
 ENV PYTORCH_ROCM_ARCH=gfx942;gfx950
 
-ARG SGL_REPO="https://github.com/sgl-project/sglang.git"
+ARG SGL_REPO="https://github.com/ek-capital/langslanger.git"
 ARG SGL_DEFAULT="main"
 ARG SGL_BRANCH=${SGL_DEFAULT}
 ARG BRANCH_TYPE=remote

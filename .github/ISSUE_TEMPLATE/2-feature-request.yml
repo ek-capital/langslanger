@@ -1,5 +1,5 @@
 name: 🚀 Feature request
-description: Suggest an idea for this project
+description: Suggest a LangSlanger experiment or capability.
 title: "[Feature] "
 
 body:
@@ -7,7 +7,7 @@ body:
   attributes:
     label: Checklist
     options:
-      - label: If this is not a feature request but a general question, please start a discussion at https://github.com/sgl-project/sglang/discussions. Otherwise, it will be closed.
+      - label: I searched existing LangSlanger issues and pull requests.
       - label: Please use English. Otherwise, it will be closed.
 - type: textarea
   attributes:
@@ -20,4 +20,4 @@ body:
   attributes:
     label: Related resources
     description: |
-      Provide official releases or third-party implementations if available.
+      Provide profiles, benchmarks, papers, upstream work, or third-party implementations if available.

@@ -53,7 +53,7 @@ def image_stream_request_test(client):
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": "https://raw.githubusercontent.com/sgl-project/sglang/main/assets/logo.png"
+                            "url": "https://raw.githubusercontent.com/ek-capital/langslanger/main/examples/assets/example_image.png"
                         },
                     },
                     {
@@ -92,7 +92,7 @@ def multi_image_stream_request_test(client):
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": "https://raw.githubusercontent.com/sgl-project/sglang/main/assets/logo.png"
+                            "url": "https://raw.githubusercontent.com/ek-capital/langslanger/main/examples/assets/example_image.png"
                         },
                         "modalities": "multi-images",
                     },
@@ -161,7 +161,7 @@ def image_speed_test(client):
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": "https://raw.githubusercontent.com/sgl-project/sglang/main/assets/logo.png"
+                            "url": "https://raw.githubusercontent.com/ek-capital/langslanger/main/examples/assets/example_image.png"
                         },
                     },
                     {

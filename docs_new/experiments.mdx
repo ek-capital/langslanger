@@ -1,0 +1,40 @@
+---
+title: "Experiments"
+description: "Run reproducible optimization experiments and replay measured hotspots."
+---
+
+## Required evidence
+
+Record the baseline and candidate commits, model and weights revision, hardware
+topology, software versions, launch arguments, workload revision and hash,
+warmup, raw samples, correctness checks, and observed variance.
+
+Use the two `nvidia/SPEED-Bench` suites as the canonical semantic workloads.
+Keep diagnostic random or synthetic prompts clearly labelled.
+
+## Replay a measured hotspot
+
+Replay capture is disabled by default. Arm one exact semantic scope only after a
+profile identifies it:
+
+```bash
+export SGLANG_REPLAY_CAPTURE_DIR=/local/fast/storage/replays
+export SGLANG_REPLAY_CAPTURE_SCOPES=model.attention.mla
+```
+
+Run the real serving case once, then validate and benchmark the completed
+capsule offline:
+
+```bash
+python -m sglang.srt.debug_utils.replay_runner \
+  /local/fast/storage/replays/<capsule>.replay \
+  --candidate package.module:candidate \
+  --reference package.module:reference \
+  --device cuda \
+  --warmup 10 \
+  --iterations 100 \
+  --output /local/fast/storage/replays/result.json
+```
+
+Replay timing is diagnostic evidence. Re-run the winning candidate in the same
+serving benchmark and target topology before making a performance claim.

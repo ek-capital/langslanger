@@ -34,8 +34,8 @@ try:
 except ImportError:
     requests = None  # type: ignore
 
-DEFAULT_OWNER = "sgl-project"
-DEFAULT_NAME = "sglang"
+DEFAULT_OWNER = "ek-capital"
+DEFAULT_NAME = "langslanger"
 
 HEADERS: dict[str, str] = {}
 

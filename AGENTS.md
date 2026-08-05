@@ -285,8 +285,6 @@ experimental workflows. Do not document flags, defaults, or behavior from
 memory; verify them against the checked-out code and the tested environment.
 
 More-specific `AGENTS.md` files override this file within their directory tree.
-In particular, follow `docs_new/AGENTS.md` for documentation-site work in the
-current stable tree.
 
 ## Safety and repository hygiene
 

@@ -1,0 +1,58 @@
+name: Publish LangSlanger Image
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: langslanger-image
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    if: github.repository == 'ek-capital/langslanger'
+    runs-on: [self-hosted, linux, x64, langslanger-docker-builder]
+    timeout-minutes: 360
+    env:
+      IMAGE: ghcr.io/ek-capital/langslanger
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve immutable image tag
+        id: image
+        shell: bash
+        run: echo "sha_tag=sha-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: Build checked-out source and publish
+        shell: bash
+        run: |
+          docker buildx build \
+            --target runtime \
+            --platform linux/amd64 \
+            --push \
+            --tag "${IMAGE}:nightly" \
+            --tag "${IMAGE}:${{ steps.image.outputs.sha_tag }}" \
+            --build-arg BRANCH_TYPE=local \
+            --build-arg BUILD_TYPE=all \
+            --build-arg CUDA_VERSION=13.0.1 \
+            --build-arg INSTALL_FLASHINFER_JIT_CACHE=1 \
+            --build-arg SGLANG_BUILD_COMMIT="${GITHUB_SHA}" \
+            --build-arg SGLANG_BUILD_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --build-arg SGLANG_IMAGE_TAG="${IMAGE}:${{ steps.image.outputs.sha_tag }}" \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            --file docker/Dockerfile \
+            .

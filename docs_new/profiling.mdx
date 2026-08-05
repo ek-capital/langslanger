@@ -1,0 +1,49 @@
+---
+title: "Profiling"
+description: "Collect attributable prefill, decode, and speculative-decoding evidence."
+---
+
+Profile the same serving configuration used for the benchmark. Keep profiling
+and replay capture in separate runs because capture changes execution.
+
+## Capture a bounded profile
+
+Start the server, warm the workload, then request a fixed number of profile
+steps:
+
+```bash
+curl -X POST http://127.0.0.1:30000/start_profile \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "output_dir": "/local/fast/storage/profiles",
+    "profile_id": "experiment-001",
+    "num_steps": 20,
+    "activities": ["CPU", "GPU"],
+    "profile_by_stage": true
+  }'
+```
+
+When `num_steps` is set, profiling stops automatically after that many steps.
+Otherwise call `POST /stop_profile`.
+
+## Produce the attribution report
+
+```bash
+python -m sglang.srt.observability.profile_report \
+  /local/fast/storage/profiles \
+  --profile-id experiment-001
+```
+
+The report keeps request latency, interval-union GPU time, summed GPU work,
+service cost per committed token, overlap, and cross-rank skew distinct. It
+reports attribution coverage and leaves unsupported claims unknown.
+
+For Nsight Systems graph-node joins, export the report and Nsight SQLite file,
+then run:
+
+```bash
+python -m sglang.srt.observability.profile_graph_map \
+  trace.sqlite \
+  --profile-report /local/fast/storage/profiles/experiment-001.report.json \
+  --output /local/fast/storage/profiles/experiment-001.graph-map.json
+```

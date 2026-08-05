@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
       - name: sglang-container
-        image: docker.io/lmsysorg/sglang:latest
+        image: ghcr.io/ek-capital/langslanger:nightly
         imagePullPolicy: Always # image may be replaced by official CI versioned image
         command:
         - /bin/bash

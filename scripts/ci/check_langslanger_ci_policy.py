@@ -6,6 +6,13 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_DIR = ROOT / ".github" / "workflows"
+REMOVED_UPSTREAM_AUTOMATION_PREFIXES = ("bot-", "release-")
+REMOVED_UPSTREAM_AUTOMATION_NAMES = {
+    "_docker-build-and-publish.yml",
+    "_docker-cleanup-nightly.yml",
+    "retag-docker.yml",
+    "sync-lmsys-sglang-blogs.yml",
+}
 MANUAL_ONLY_WORKFLOWS = (
     "pr-test-musa.yml",
     "pr-test-npu.yml",
@@ -52,6 +59,38 @@ def require(condition: bool, message: str) -> None:
 
 
 def main() -> None:
+    workflow_names = {path.name for path in WORKFLOW_DIR.glob("*.yml")}
+    forbidden_names = {
+        name
+        for name in workflow_names
+        if name.startswith(REMOVED_UPSTREAM_AUTOMATION_PREFIXES)
+    }
+    forbidden_names.update(workflow_names & REMOVED_UPSTREAM_AUTOMATION_NAMES)
+    require(
+        not forbidden_names,
+        "upstream publishing or bot workflows returned: "
+        + ", ".join(sorted(forbidden_names)),
+    )
+
+    image_workflow = load_workflow("langslanger-image.yml")
+    require(
+        set(image_workflow["on"]) == {"workflow_dispatch"},
+        "container publishing must remain manual until a builder is provisioned",
+    )
+    image_source = (WORKFLOW_DIR / "langslanger-image.yml").read_text(encoding="utf-8")
+    for required in (
+        "ghcr.io/ek-capital/langslanger",
+        "packages: write",
+        "BRANCH_TYPE=local",
+        "github.repository == 'ek-capital/langslanger'",
+    ):
+        require(required in image_source, f"image workflow is missing {required!r}")
+    for forbidden in ("lmsysorg/sglang", "sgl-project/whl", "pypi"):
+        require(
+            forbidden not in image_source,
+            f"image workflow still targets upstream publishing surface {forbidden!r}",
+        )
+
     for name in MANUAL_ONLY_WORKFLOWS:
         triggers = load_workflow(name)["on"]
         automatic = {"push", "pull_request"}.intersection(triggers)

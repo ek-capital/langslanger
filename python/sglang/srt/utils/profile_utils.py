@@ -12,6 +12,7 @@ from sglang.srt.distributed.parallel_state_wrapper import ParallelState
 from sglang.srt.environ import envs
 from sglang.srt.managers.io_struct import ProfileReqOutput
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+from sglang.srt.observability.profile_manifest import write_profile_manifest
 from sglang.srt.platforms import current_platform
 from sglang.srt.runtime_context import get_server_args
 from sglang.srt.utils import is_npu
@@ -65,6 +66,7 @@ class ProfileManager:
         self.first_rank_in_node = ps.gpu_id == get_server_args().base_gpu_id
         self.profiler_kwargs = None
         self.profiler = None
+        self.profiler_started_at_ns = None
 
     def step(self, forward_mode: ForwardMode):
         stage = _get_stage_from_forward_mode(forward_mode)
@@ -137,15 +139,35 @@ class ProfileManager:
             first_rank_in_node=self.first_rank_in_node,
             output_suffix=f"-{stage}" if stage else "",
         )
+        self.profiler_started_at_ns = time.time_ns()
         self.profiler.start()
 
     def _do_stop(self):
         logger.info("Stop profiling...")
-        self.profiler.stop()
+        artifact_paths = self.profiler.stop()
+        stopped_at_ns = time.time_ns()
+        write_profile_manifest(
+            output_dir=self.profiler_kwargs["output_dir"],
+            profile_id=self.profiler_kwargs["profile_id"],
+            profile_prefix=self.profiler_kwargs["output_prefix"],
+            stage=self.profiler.output_suffix.removeprefix("-") or None,
+            ps=self.ps,
+            activities=self.profiler_kwargs["activities"],
+            profiler_options={
+                "with_stack": self.profiler_kwargs["with_stack"],
+                "record_shapes": self.profiler_kwargs["record_shapes"],
+                "profile_by_stage": True,
+            },
+            server_args=get_server_args(),
+            started_at_ns=self.profiler_started_at_ns,
+            stopped_at_ns=stopped_at_ns,
+            artifact_paths=artifact_paths,
+        )
         logger.info(
             f"Profiling done. Traces are saved to: {self.profiler_kwargs['output_dir']}"
         )
         self.profiler = None
+        self.profiler_started_at_ns = None
 
 
 def _get_stage_from_forward_mode(forward_mode: ForwardMode):
@@ -266,8 +288,16 @@ class _ProfilerList(_ProfilerBase):
             inner.start()
 
     def stop(self):
+        artifacts = []
         for inner in self.inners:
-            inner.stop()
+            artifacts.extend(inner.stop())
+        return artifacts
+
+    @property
+    def output_suffix(self):
+        if not self.inners:
+            return ""
+        return self.inners[0].output_suffix
 
 
 class _ProfilerConcreteBase(_ProfilerBase):
@@ -349,12 +379,14 @@ class _ProfilerTorch(_ProfilerConcreteBase):
                 + ".trace.json.gz"
             )
 
-            self.torch_profiler.export_chrome_trace(
-                os.path.join(self.output_dir, filename)
-            )
+            trace_path = os.path.join(self.output_dir, filename)
+            self.torch_profiler.export_chrome_trace(trace_path)
+        else:
+            trace_path = None
         torch.distributed.barrier(self.cpu_group)
 
         # TODO: migrate `_merge_profile_traces`
+        return [trace_path] if trace_path is not None else []
 
 
 class _ProfilerMemory(_ProfilerConcreteBase):
@@ -373,6 +405,7 @@ class _ProfilerMemory(_ProfilerConcreteBase):
         )
         torch.cuda.memory._dump_snapshot(memory_profile_path)
         torch.cuda.memory._record_memory_history(enabled=None)
+        return [memory_profile_path]
 
 
 class _ProfilerCudart(_ProfilerConcreteBase):
@@ -385,6 +418,7 @@ class _ProfilerCudart(_ProfilerConcreteBase):
         if self.first_rank_in_node:
             logger.info(f"Call cudaProfilerStop")
             torch.cuda.cudart().cudaProfilerStop()
+        return []
 
 
 class _ProfilerRPD(_ProfilerConcreteBase):
@@ -429,6 +463,8 @@ class _ProfilerRPD(_ProfilerConcreteBase):
             from sglang.srt.utils.rpd_utils import rpd_to_chrome_trace
 
             rpd_to_chrome_trace("trace.rpd", self.rpd_profile_path)
+            return [self.rpd_profile_path]
+        return []
 
 
 def build_step_span_name(forward_batch: ForwardBatch) -> str:

@@ -18,6 +18,7 @@ import torch
 from sglang.srt.environ import envs
 from sglang.srt.managers.io_struct import ProfileReq, ProfileReqOutput, ProfileReqType
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
+from sglang.srt.observability.profile_manifest import write_profile_manifest
 from sglang.srt.platforms import current_platform
 from sglang.srt.runtime_context import get_server_args
 from sglang.srt.utils import is_mps, is_npu
@@ -77,6 +78,7 @@ class SchedulerProfilerManager:
         self.profile_by_stage: bool = False
         self.profile_in_progress: bool = False
         self.merge_profiles = False
+        self.profiler_started_at_ns: Optional[int] = None
 
         # For ROCM
         self.rpd_profiler = None
@@ -162,6 +164,7 @@ class SchedulerProfilerManager:
         logger.info(
             f"Profiling starts{stage_str}. Traces will be saved to: {self.torch_profiler_output_dir} (with profile id: {self.profile_id})",
         )
+        self.profiler_started_at_ns = time.time_ns()
 
         activities = self.profiler_activities
         with_stack = self.torch_profiler_with_stack
@@ -314,6 +317,7 @@ class SchedulerProfilerManager:
 
         stage_suffix = f"-{stage.name}" if stage else ""
         logger.info("Stop profiling" + stage_suffix + "...")
+        artifact_paths = []
         if self.torch_profiler is not None:
             self.torch_profiler.stop()
             if not _is_npu:
@@ -335,9 +339,9 @@ class SchedulerProfilerManager:
                     + ".trace.json.gz"
                 )
 
-                self.torch_profiler.export_chrome_trace(
-                    os.path.join(self.torch_profiler_output_dir, filename)
-                )
+                trace_path = os.path.join(self.torch_profiler_output_dir, filename)
+                self.torch_profiler.export_chrome_trace(trace_path)
+                artifact_paths.append(trace_path)
             torch.distributed.barrier(self.dp_tp_cpu_group)
 
         if self.rpd_profiler is not None:
@@ -350,6 +354,7 @@ class SchedulerProfilerManager:
                 from sglang.srt.utils.rpd_utils import rpd_to_chrome_trace
 
                 rpd_to_chrome_trace("trace.rpd", self.rpd_profile_path)
+                artifact_paths.append(self.rpd_profile_path)
             self.rpd_profiler = None
             self.rpd_profile_path = None
 
@@ -363,12 +368,33 @@ class SchedulerProfilerManager:
             )
             torch.cuda.memory._dump_snapshot(memory_profile_path)
             torch.cuda.memory._record_memory_history(enabled=None)
+            artifact_paths.append(memory_profile_path)
 
         if "CUDA_PROFILER" in self.profiler_activities:
             if self.ps.gpu_id == get_server_args().base_gpu_id:
                 torch.cuda.cudart().cudaProfilerStop()
 
         merge_message = self._merge_profile_traces()
+
+        stopped_at_ns = time.time_ns()
+        write_profile_manifest(
+            output_dir=self.torch_profiler_output_dir,
+            profile_id=self.profile_id,
+            profile_prefix=self.profile_prefix,
+            stage=stage.name.lower() if stage else None,
+            ps=self.ps,
+            activities=self.profiler_activities,
+            profiler_options={
+                "with_stack": self.torch_profiler_with_stack,
+                "record_shapes": self.torch_profiler_record_shapes,
+                "profile_by_stage": self.profile_by_stage,
+                "merge_profiles": self.merge_profiles,
+            },
+            server_args=get_server_args(),
+            started_at_ns=self.profiler_started_at_ns or stopped_at_ns,
+            stopped_at_ns=stopped_at_ns,
+            artifact_paths=artifact_paths,
+        )
 
         logger.info(
             "Profiling done. Traces are saved to: %s%s",
@@ -378,6 +404,7 @@ class SchedulerProfilerManager:
         self.torch_profiler = None
         self.profile_in_progress = False
         self.profiler_start_forward_ct = None
+        self.profiler_started_at_ns = None
 
         return ProfileReqOutput(success=True, message=f"Succeeded.{merge_message}")
 

@@ -4,19 +4,13 @@ name: PR Test Extra
 # Adds runtime to a PR only when the author asks for it: the PR must carry
 # BOTH `run-ci` (basic-CI prerequisite) and `run-ci-extra` (explicit opt-in
 # to this workflow). The shared gate skips cleanly until those labels are in
-# the pull-request event. `labeled` and `ready_for_review` events re-evaluate
-# the gate, while workflow_dispatch / workflow_call remain explicit bypasses.
+# the pull-request event. langslanger-pr-hardware.yml owns PR dispatch, while
+# workflow_dispatch / workflow_call remain explicit bypasses.
 #
 # Stages: extra-a (1-/2-gpu) and extra-b (4-/8-gpu) caller stubs reuse
 # `_pr-test-stage.yml` and `_pr-test-check-changes.yml` from pr-test.yml.
 
 on:
-  pull_request:
-    # `labeled` lets the workflow re-fire when `run-ci-extra` (or `run-ci`)
-    # is added after the latest push — otherwise GHA leaves the stale
-    # skipped run in place and there's no way to enable extra without
-    # another push. See check-changes.if below for the matching guard.
-    types: [opened, synchronize, reopened, ready_for_review, labeled]
   workflow_dispatch:
     inputs:
       force_continue_on_error:

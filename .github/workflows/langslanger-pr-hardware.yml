@@ -1,0 +1,64 @@
+name: LangSlanger PR Hardware
+
+# Keep the default PR path cheap. This workflow is the only automatic PR
+# entrypoint for heavyweight platform tests; the called workflows retain
+# workflow_dispatch and schedule entrypoints for explicit runs.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+
+concurrency:
+  group: langslanger-pr-hardware-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  actions: write
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  base:
+    if: |
+      github.event.pull_request.draft == false &&
+      contains(github.event.pull_request.labels.*.name, 'run-ci')
+    uses: ./.github/workflows/pr-test.yml
+    secrets: inherit
+
+  amd:
+    if: |
+      github.event.pull_request.draft == false &&
+      contains(github.event.pull_request.labels.*.name, 'run-ci')
+    uses: ./.github/workflows/pr-test-amd.yml
+    secrets: inherit
+
+  extra:
+    if: |
+      github.event.pull_request.draft == false &&
+      contains(github.event.pull_request.labels.*.name, 'run-ci') &&
+      contains(github.event.pull_request.labels.*.name, 'run-ci-extra')
+    uses: ./.github/workflows/pr-test-extra.yml
+    secrets: inherit
+
+  amd-extra:
+    if: |
+      github.event.pull_request.draft == false &&
+      contains(github.event.pull_request.labels.*.name, 'run-ci') &&
+      contains(github.event.pull_request.labels.*.name, 'run-ci-extra')
+    uses: ./.github/workflows/pr-test-amd-extra.yml
+    secrets: inherit
+
+  arm64:
+    if: |
+      github.event.pull_request.draft == false &&
+      contains(github.event.pull_request.labels.*.name, 'run-ci')
+    uses: ./.github/workflows/pr-test-arm64.yml
+    secrets: inherit
+
+  mlx:
+    if: |
+      github.event.pull_request.draft == false &&
+      contains(github.event.pull_request.labels.*.name, 'run-ci')
+    uses: ./.github/workflows/pr-test-mlx.yml
+    secrets: inherit

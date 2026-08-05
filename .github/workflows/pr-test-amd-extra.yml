@@ -4,8 +4,8 @@ name: PR Test Extra (AMD)
 # Adds AMD runtime to a PR only when the author opts in: the PR must carry
 # BOTH `run-ci` (basic-CI prerequisite) and `run-ci-extra` (explicit opt-in).
 # The shared gate skips cleanly until the pull-request event contains both
-# labels. `labeled` and `ready_for_review` events re-evaluate it, while the job
-# graph remains available through workflow_dispatch / workflow_call.
+# labels. langslanger-pr-hardware.yml owns PR dispatch, while the job graph
+# remains available through workflow_dispatch / workflow_call.
 #
 # Stage: extra-a. Each job mirrors the container bring-up of pr-test-amd.yml
 # and dispatches `run_suite.py --hw amd --suite extra-a-test-{config}-amd`:
@@ -18,11 +18,6 @@ name: PR Test Extra (AMD)
 # (it now exercises the ROCm canary kernels end-to-end).
 
 on:
-  pull_request:
-    # `labeled` lets the workflow re-fire when `run-ci-extra` (or `run-ci`)
-    # is added after the latest push. See call-gate.if for the matching guard
-    # that prevents unrelated label additions from dispatching a full run.
-    types: [opened, synchronize, reopened, ready_for_review, labeled]
   workflow_dispatch:
     inputs:
       runner_arch:

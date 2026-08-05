@@ -1,9 +1,6 @@
 name: PR Test (MLX)
 
 on:
-  pull_request:
-    branches: [ main ]
-    types: [opened, synchronize, reopened, ready_for_review, labeled]
   workflow_dispatch:
     inputs:
       # target_stage is the job id (e.g. stage-b-e2e-test-mlx), distinct from
@@ -17,6 +14,13 @@ on:
           - ''
           - stage-a-unit-test-mlx
           - stage-b-e2e-test-mlx
+  workflow_call:
+    inputs:
+      target_stage:
+        description: "Optional stage to run; empty uses change detection"
+        required: false
+        type: string
+        default: ''
 
 concurrency:
   group: pr-test-mlx-${{ github.ref }}

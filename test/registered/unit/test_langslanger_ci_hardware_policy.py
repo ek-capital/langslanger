@@ -18,7 +18,7 @@ MANUAL_ONLY_WORKFLOWS = (
     "pr-test-xeon.yml",
     "pr-test-xpu.yml",
 )
-OPT_IN_PR_WORKFLOWS = (
+DISPATCHED_HARDWARE_WORKFLOWS = (
     "pr-test.yml",
     "pr-test-extra.yml",
     "pr-test-amd.yml",
@@ -33,6 +33,14 @@ GATE_JOBS = {
     "pr-test-amd-extra.yml": ("call-gate", ("run-ci", "run-ci-extra")),
     "pr-test-arm64.yml": ("pr-gate", ("run-ci",)),
     "pr-test-mlx.yml": ("pr-gate", ("run-ci",)),
+}
+DISPATCH_JOBS = {
+    "base": ("pr-test.yml", ("run-ci",)),
+    "extra": ("pr-test-extra.yml", ("run-ci", "run-ci-extra")),
+    "amd": ("pr-test-amd.yml", ("run-ci",)),
+    "amd-extra": ("pr-test-amd-extra.yml", ("run-ci", "run-ci-extra")),
+    "arm64": ("pr-test-arm64.yml", ("run-ci",)),
+    "mlx": ("pr-test-mlx.yml", ("run-ci",)),
 }
 
 WORKFLOWS = {
@@ -134,14 +142,29 @@ class TestLangSlangerCIHardwarePolicy(unittest.TestCase):
                 source = (ROOT / ".github" / "workflows" / workflow_name).read_text()
                 self.assertNotIn(unsafe, source)
 
-    def test_opt_in_workflows_recheck_ready_and_labeled_prs(self):
-        for workflow_name in OPT_IN_PR_WORKFLOWS:
+    def test_pr_hardware_has_one_label_gated_dispatcher(self):
+        dispatcher = load_yaml(
+            ROOT / ".github" / "workflows" / "langslanger-pr-hardware.yml"
+        )
+        pull_request = dispatcher["on"]["pull_request"]
+        self.assertIn("ready_for_review", pull_request["types"])
+        self.assertIn("labeled", pull_request["types"])
+
+        for job_name, (workflow_name, labels) in DISPATCH_JOBS.items():
+            with self.subTest(job=job_name):
+                job = dispatcher["jobs"][job_name]
+                self.assertIn(workflow_name, job["uses"])
+                self.assertIn("draft == false", job["if"])
+                for label in labels:
+                    self.assertIn(f"'{label}'", job["if"])
+
+        for workflow_name in DISPATCHED_HARDWARE_WORKFLOWS:
             with self.subTest(workflow=workflow_name):
-                pull_request = load_yaml(
-                    ROOT / ".github" / "workflows" / workflow_name
-                )["on"]["pull_request"]
-                self.assertIn("ready_for_review", pull_request["types"])
-                self.assertIn("labeled", pull_request["types"])
+                triggers = load_yaml(ROOT / ".github" / "workflows" / workflow_name)[
+                    "on"
+                ]
+                self.assertNotIn("pull_request", triggers)
+                self.assertIn("workflow_call", triggers)
 
     def test_opt_in_is_enforced_by_reusable_workflow_callers(self):
         for workflow_name, (gate_job, labels) in GATE_JOBS.items():

@@ -12,7 +12,7 @@ MANUAL_ONLY_WORKFLOWS = (
     "pr-test-xeon.yml",
     "pr-test-xpu.yml",
 )
-OPT_IN_PR_WORKFLOWS = (
+DISPATCHED_HARDWARE_WORKFLOWS = (
     "pr-test.yml",
     "pr-test-extra.yml",
     "pr-test-amd.yml",
@@ -27,6 +27,14 @@ GATE_JOBS = {
     "pr-test-amd-extra.yml": ("call-gate", ("run-ci", "run-ci-extra")),
     "pr-test-arm64.yml": ("pr-gate", ("run-ci",)),
     "pr-test-mlx.yml": ("pr-gate", ("run-ci",)),
+}
+DISPATCH_JOBS = {
+    "base": ("pr-test.yml", ("run-ci",)),
+    "extra": ("pr-test-extra.yml", ("run-ci", "run-ci-extra")),
+    "amd": ("pr-test-amd.yml", ("run-ci",)),
+    "amd-extra": ("pr-test-amd-extra.yml", ("run-ci", "run-ci-extra")),
+    "arm64": ("pr-test-arm64.yml", ("run-ci",)),
+    "mlx": ("pr-test-mlx.yml", ("run-ci",)),
 }
 UNSAFE_SKIPPED_GATE = (
     "needs.call-gate.result == 'success' || " "needs.call-gate.result == 'skipped'"
@@ -90,11 +98,28 @@ def main() -> None:
     gate_source = (WORKFLOW_DIR / "pr-gate.yml").read_text(encoding="utf-8")
     require("PR is draft. Blocking CI." not in gate_source, "Drafts still fail CI")
 
-    for name in OPT_IN_PR_WORKFLOWS:
+    dispatcher = load_workflow("langslanger-pr-hardware.yml")
+    pr_trigger = dispatcher["on"]["pull_request"]
+    for event_type in ("ready_for_review", "labeled"):
+        require(event_type in pr_trigger["types"], f"dispatcher misses {event_type}")
+
+    for job_name, (workflow_name, labels) in DISPATCH_JOBS.items():
+        job = dispatcher["jobs"][job_name]
+        require(
+            workflow_name in job["uses"],
+            f"dispatcher job {job_name} does not call {workflow_name}",
+        )
+        require("draft == false" in job["if"], f"{job_name} accepts draft PRs")
+        for label in labels:
+            require(f"'{label}'" in job["if"], f"{job_name} misses {label!r}")
+
+    for name in DISPATCHED_HARDWARE_WORKFLOWS:
         workflow = load_workflow(name)
-        types = set(workflow["on"]["pull_request"].get("types", []))
-        require("ready_for_review" in types, f"{name} misses ready_for_review")
-        require("labeled" in types, f"{name} misses labeled")
+        require(
+            "pull_request" not in workflow["on"],
+            f"{name} bypasses the PR hardware dispatcher",
+        )
+        require("workflow_call" in workflow["on"], f"{name} is not reusable")
 
         gate_job, labels = GATE_JOBS[name]
         caller_condition = workflow["jobs"][gate_job].get("if", "")

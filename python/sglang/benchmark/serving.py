@@ -15,6 +15,7 @@ python3 -m sglang.benchmark.serving --backend sglang --dataset-name random --num
 import argparse
 import asyncio
 import copy
+import hashlib
 import importlib.util
 import json
 import math
@@ -59,6 +60,16 @@ TERM_PLOTLIB_AVAILABLE = (importlib.util.find_spec("termplotlib") is not None) a
 )
 
 global args
+
+
+def _sha256_file(path: str) -> Optional[str]:
+    if not path or not os.path.isfile(path):
+        return None
+    digest = hashlib.sha256()
+    with open(path, "rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 # don't want to import sglang package here
@@ -1097,6 +1108,12 @@ def calculate_metrics(
                 total_input += input_requests[i].prompt_len
                 total_input_text += input_requests[i].text_prompt_len
                 total_input_vision += input_requests[i].vision_prompt_len
+            else:
+                # Multi-turn requests are flattened into one output per round.
+                # The wrapper records each round's cumulative rendered prompt
+                # length on the output, so retain real prefill accounting.
+                total_input += outputs[i].prompt_len
+                total_input_text += outputs[i].prompt_len
             if output_len > 1:
                 tpots.append((outputs[i].latency - outputs[i].ttft) / (output_len - 1))
             if use_retokenized_itl:
@@ -1260,7 +1277,28 @@ def _normalize_round_messages(turn: Any) -> Optional[List[Dict[str, str]]]:
     return None
 
 
-def wrap_multi_turn_request_func(request_func: Callable, backend: str) -> Callable:
+def _rendered_chat_prompt_len(
+    tokenizer: PreTrainedTokenizerBase, messages: List[Dict[str, str]]
+) -> int:
+    try:
+        prompt_ids = tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=True,
+        )
+        return len(prompt_ids)
+    except Exception:
+        return sum(
+            len(tokenizer.encode(str(message.get("content", ""))))
+            for message in messages
+        )
+
+
+def wrap_multi_turn_request_func(
+    request_func: Callable,
+    backend: str,
+    tokenizer: PreTrainedTokenizerBase,
+) -> Callable:
     assert (
         backend in MULTI_TURN_BACKENDS
     ), f"Multi-turn only supports chat backends: {MULTI_TURN_BACKENDS}, got {backend}"
@@ -1283,8 +1321,12 @@ def wrap_multi_turn_request_func(request_func: Callable, backend: str) -> Callab
                 )
             prev_messages.extend(normalized)
 
+            prompt_len = _rendered_chat_prompt_len(tokenizer, prev_messages)
+
             inner_input = replace(
-                copy.deepcopy(request_func_input), prompt=copy.deepcopy(prev_messages)
+                copy.deepcopy(request_func_input),
+                prompt=copy.deepcopy(prev_messages),
+                prompt_len=prompt_len,
             )
             output = await request_func(
                 inner_input, pbar=pbar if round_index == len(prompts) - 1 else None
@@ -1338,7 +1380,11 @@ async def benchmark(
         and _normalize_round_messages(first_prompt[0]) is not None
     )
     if is_multi_turn:
-        request_func = wrap_multi_turn_request_func(request_func, backend=backend)
+        request_func = wrap_multi_turn_request_func(
+            request_func,
+            backend=backend,
+            tokenizer=tokenizer,
+        )
 
     # Limit concurrency
     # From https://github.com/vllm-project/vllm/pull/9390
@@ -1749,6 +1795,8 @@ async def benchmark(
             "tag": getattr(args, "tag", None),
             "backend": args.backend,
             "dataset_name": args.dataset_name,
+            "dataset_path": args.dataset_path or None,
+            "dataset_sha256": getattr(args, "dataset_sha256", None),
             "request_rate": "trace" if use_trace_timestamps else request_rate,
             "max_concurrency": max_concurrency,
             "sharegpt_output_len": args.sharegpt_output_len,
@@ -1798,6 +1846,10 @@ async def benchmark(
             "max_output_tokens_per_s": metrics.max_output_tokens_per_s,
             "max_concurrent_requests": metrics.max_concurrent_requests,
         }
+
+        if args.dataset_name.startswith("speed-bench"):
+            result["speed_bench_category"] = args.speed_bench_category
+            result["speed_bench_output_len"] = args.speed_bench_output_len
 
         if args.cache_report:
             result["cache_report"] = {
@@ -2063,6 +2115,7 @@ def run_benchmark(args_: argparse.Namespace):
 
     tokenizer = get_tokenizer(tokenizer_id)
     input_requests = get_dataset(args, tokenizer, model_id)
+    args.dataset_sha256 = _sha256_file(args.dataset_path)
 
     # compatible with SimpleNamespace
     if not hasattr(args, "flush_cache"):
@@ -2198,6 +2251,8 @@ def cli_main():
             "image",
             "mooncake",
             "longbench_v2",
+            "speed-bench-qualitative",
+            "speed-bench-throughput",
             "speed-bench",
         ],
         help="Name of the dataset to benchmark on.",
@@ -2224,8 +2279,9 @@ def cli_main():
         "--speed-bench-category",
         type=str,
         default=None,
-        choices=["low_entropy", "mixed", "high_entropy"],
-        help="Category filter for the speed-bench dataset.",
+        help="Category filter for a canonical SPEED-Bench suite. Qualitative "
+        "uses semantic categories; throughput uses low_entropy, mixed, or "
+        "high_entropy. The selected suite validates the value.",
     )
     parser.add_argument(
         "--speed-bench-output-len",

@@ -251,33 +251,52 @@ class TestBenchmarkDatasetsAPI(unittest.TestCase):
                 f.write(json.dumps(row) + "\n")
         return str(path)
 
-    def _write_speed_bench_jsonl(self):
-        rows = [
-            {
-                "question_id": "sb_001",
-                "category": "low_entropy",
-                "turns": ["Complete this Python function: def add(a, b):"],
-            },
-            {
-                "question_id": "sb_002",
-                "category": "mixed",
-                "turns": [
-                    "Explain the concept of attention mechanisms in transformers."
-                ],
-            },
-            {
-                "question_id": "sb_003",
-                "category": "high_entropy",
-                "turns": ["Write a short story about a robot discovering music."],
-            },
-            {
-                "question_id": "sb_004",
-                "category": "low_entropy",
-                "turns": [
-                    "Sort the following list in ascending order: [5, 2, 8, 1, 9]"
-                ],
-            },
-        ]
+    def _write_speed_bench_jsonl(self, suite="throughput", placeholder=False):
+        if suite == "qualitative":
+            rows = [
+                {
+                    "question_id": "sb_q_001",
+                    "category": "coding",
+                    "turns": ["Complete this Python function: def add(a, b):"],
+                },
+                {
+                    "question_id": "sb_q_002",
+                    "category": "math",
+                    "turns": ["Solve 2x = 8.", "Now explain the method."],
+                },
+            ]
+        else:
+            rows = [
+                {
+                    "question_id": "sb_001",
+                    "category": "low_entropy",
+                    "turns": ["Complete this Python function: def add(a, b):"],
+                },
+                {
+                    "question_id": "sb_002",
+                    "category": "mixed",
+                    "turns": [
+                        "Explain the concept of attention mechanisms in transformers."
+                    ],
+                },
+                {
+                    "question_id": "sb_003",
+                    "category": "high_entropy",
+                    "turns": ["Write a short story about a robot discovering music."],
+                },
+                {
+                    "question_id": "sb_004",
+                    "category": "low_entropy",
+                    "turns": [
+                        "Sort the following list in ascending order: [5, 2, 8, 1, 9]"
+                    ],
+                },
+            ]
+        if placeholder:
+            rows[0]["turns"] = [
+                "FULL BENCHMARK DATA SHOULD BE FETCHED FROM THE SOURCE USING "
+                "SPECDEC_BENCH"
+            ]
         path = self.tmpdir_path / "speed_bench.jsonl"
         with open(path, "w") as f:
             for row in rows:
@@ -581,6 +600,57 @@ class TestBenchmarkDatasetsAPI(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertTrue(all(isinstance(row, DatasetRow) for row in rows))
 
+    def test_speed_bench_qualitative_preserves_all_turns(self):
+        dataset_path = self._write_speed_bench_jsonl(suite="qualitative")
+        args = make_args(
+            dataset_name="speed-bench-qualitative",
+            dataset_path=dataset_path,
+            backend="sglang-oai-chat",
+            num_prompts=2,
+        )
+        from sglang.benchmark.datasets.speed_bench import SpeedBenchDataset
+
+        rows = SpeedBenchDataset.from_args(args).load(self.tokenizer)
+        self.assertTrue(all(isinstance(row.prompt, list) for row in rows))
+        self.assertEqual(sorted(len(row.prompt) for row in rows), [1, 2])
+
+    def test_speed_bench_qualitative_requires_chat_backend(self):
+        dataset_path = self._write_speed_bench_jsonl(suite="qualitative")
+        args = make_args(
+            dataset_name="speed-bench-qualitative",
+            dataset_path=dataset_path,
+            backend="sglang",
+            num_prompts=1,
+        )
+        from sglang.benchmark.datasets.speed_bench import SpeedBenchDataset
+
+        with self.assertRaisesRegex(ValueError, "requires a chat backend"):
+            SpeedBenchDataset.from_args(args)
+
+    def test_speed_bench_suite_rejects_wrong_categories(self):
+        dataset_path = self._write_speed_bench_jsonl(suite="qualitative")
+        args = make_args(
+            dataset_name="speed-bench-throughput",
+            dataset_path=dataset_path,
+            num_prompts=1,
+        )
+        from sglang.benchmark.datasets.speed_bench import SpeedBenchDataset
+
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            SpeedBenchDataset.from_args(args).load(self.tokenizer)
+
+    def test_speed_bench_rejects_unmaterialized_source(self):
+        dataset_path = self._write_speed_bench_jsonl(placeholder=True)
+        args = make_args(
+            dataset_name="speed-bench-throughput",
+            dataset_path=dataset_path,
+            num_prompts=1,
+        )
+        from sglang.benchmark.datasets.speed_bench import SpeedBenchDataset
+
+        with self.assertRaisesRegex(ValueError, "Unmaterialized"):
+            SpeedBenchDataset.from_args(args).load(self.tokenizer)
+
     def test_speed_bench_output_len_override(self):
         dataset_path = self._write_speed_bench_jsonl()
         args = make_args(
@@ -606,9 +676,8 @@ class TestBenchmarkDatasetsAPI(unittest.TestCase):
         )
         from sglang.benchmark.datasets.speed_bench import SpeedBenchDataset
 
-        dataset = SpeedBenchDataset.from_args(args)
         with self.assertRaises(ValueError):
-            dataset.load(self.tokenizer)
+            SpeedBenchDataset.from_args(args)
 
     def test_speed_bench_no_path_raises(self):
         args = make_args(
@@ -693,6 +762,8 @@ class TestBenchmarkDatasetsAPI(unittest.TestCase):
             "mmmu",
             "image",
             "mooncake",
+            "speed-bench-qualitative",
+            "speed-bench-throughput",
             "speed-bench",
         }
         self.assertTrue(expected.issubset(set(DATASET_MAPPING.keys())))

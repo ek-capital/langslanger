@@ -132,6 +132,26 @@ possible. Prefer alternating paired runs over comparisons with historical
 numbers. Microbenchmarks are diagnostic evidence; validate meaningful wins in
 the closest practical end-to-end serving path.
 
+### Canonical prompt workloads
+
+Use the two published `nvidia/SPEED-Bench` suites as LangSlanger's canonical
+semantic prompt categories:
+
+- `speed-bench-qualitative` measures speculative-decoding acceptance and
+  latency across the eleven semantic categories, preserving multi-turn cases;
+- `speed-bench-throughput` measures prefill, decode, batching, and speculative
+  throughput across the fixed 1K, 2K, 8K, 16K, and 32K input-length artifacts
+  and their low-, mixed-, and high-entropy categories.
+
+Treat `sharegpt`, `random`, `random-ids`, generated shared prefixes, and custom
+prompt files as diagnostic or workload-specific controls, not canonical
+semantic results. A scoped experiment may run only the relevant SPEED-Bench
+suite, but a general performance claim should report both. Always record the
+dataset repository and revision, materialized artifact SHA-256, suite/config,
+category filter, sampling seed, output length, request rate, concurrency, and
+chat template or tokenizer revision. Never benchmark raw source-placeholder
+rows from the Hugging Face export.
+
 Never describe summed GPU kernel work as wall-clock latency when streams can
 overlap. Keep at least these quantities distinct:
 

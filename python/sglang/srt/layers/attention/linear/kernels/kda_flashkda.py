@@ -5,6 +5,7 @@ import torch
 from sglang.srt.layers.attention.linear.kernels.kernel_backend import (
     LinearAttnKernelBase,
 )
+from sglang.srt.observability.profile_scope import record_profile_impl
 
 # FlashKDA chunk size. Sequences shorter than this fall back to Triton.
 _FLASHKDA_CHUNK_SIZE = 64
@@ -117,9 +118,24 @@ class FlashKDAKernel(LinearAttnKernelBase):
         return_intermediate_states: bool = False,
         **kwargs,
     ) -> torch.Tensor:
-        if return_intermediate_states or self._should_fall_back(
+        should_fall_back = return_intermediate_states or self._should_fall_back(
             lower_bound, is_spec_decode, query_start_loc, extend_seq_lens_cpu
-        ):
+        )
+        if should_fall_back:
+            record_profile_impl(
+                "model.attention.kda",
+                "TritonKDAKernel.extend (FlashKDA fallback)",
+                source_objects=(_triton_fallback,),
+                source_files=("python/sglang/kernels/ops/attention/fla/kda.py",),
+                expected_symbols=("chunk_kda",),
+                loaded_modules=("triton",),
+                conditions={
+                    "operation": "extend",
+                    "flashkda_fallback": True,
+                    "return_intermediate_states": return_intermediate_states,
+                    "spec_decode": is_spec_decode,
+                },
+            )
             return _triton_fallback(
                 q,
                 k,
@@ -135,6 +151,14 @@ class FlashKDAKernel(LinearAttnKernelBase):
                 return_intermediate_states=return_intermediate_states,
             )
 
+        record_profile_impl(
+            "model.attention.kda",
+            "FlashKDAKernel.extend",
+            source_objects=(type(self), self._flashkda_extend),
+            expected_symbols=("flash_kda",),
+            loaded_modules=("flash_kda",),
+            conditions={"operation": "extend", "flashkda_fallback": False},
+        )
         return self._flashkda_extend(
             q,
             k,

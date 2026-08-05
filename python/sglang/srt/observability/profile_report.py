@@ -43,6 +43,7 @@ class _ScopeInvocation:
     event: _TraceEvent
     metadata: dict[str, Any]
     gpu_events: list[_TraceEvent] = field(default_factory=list)
+    exclusive_gpu_events: list[_TraceEvent] = field(default_factory=list)
 
 
 def analyze_profile(profile_dir: str | Path, profile_id: str | None = None):
@@ -64,6 +65,7 @@ def analyze_profile(profile_dir: str | Path, profile_id: str | None = None):
     integrity = {"verified": 0, "failed": 0, "missing": 0}
     all_invocations: list[tuple[dict[str, Any], _ScopeInvocation]] = []
     scheduler_results: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    implementation_records: list[tuple[dict[str, Any], dict[str, Any]]] = []
     total_gpu_events = 0
     attributed_gpu_events: set[tuple[str, int]] = set()
     total_gpu_work_us = 0.0
@@ -87,6 +89,8 @@ def analyze_profile(profile_dir: str | Path, profile_id: str | None = None):
                 scope_metadata[record["scope"]].append(record)
             elif record.get("event") == "scheduler_result":
                 scheduler_results.append((manifest, record))
+            elif record.get("event") == "implementation":
+                implementation_records.append((manifest, record))
 
         for trace_path in trace_paths:
             trace_events = _read_trace(trace_path)
@@ -105,14 +109,21 @@ def analyze_profile(profile_dir: str | Path, profile_id: str | None = None):
                 attributed_gpu_events.add((str(trace_path), gpu_index))
                 for invocation in matched:
                     invocation.gpu_events.append(gpu_event)
+                min(
+                    matched, key=lambda inv: inv.event.duration_us
+                ).exclusive_gpu_events.append(gpu_event)
             all_invocations.extend((manifest, invocation) for invocation in invocations)
 
     committed_by_replica_iteration = _deduplicate_scheduler_results(
         scheduler_results, warnings
     )
-    groups = _group_scope_metrics(all_invocations, committed_by_replica_iteration)
+    implementation_ids = _implementation_ids_by_rank_scope(implementation_records)
+    groups = _group_scope_metrics(
+        all_invocations, committed_by_replica_iteration, implementation_ids
+    )
     scopes = _aggregate_scope_metrics(groups)
     ranks = _aggregate_rank_metrics(groups)
+    implementations = _implementation_report(implementation_records, groups)
 
     if integrity["failed"]:
         warnings.append(f"{integrity['failed']} artifacts failed checksum validation")
@@ -156,6 +167,7 @@ def analyze_profile(profile_dir: str | Path, profile_id: str | None = None):
         "scopes": scopes,
         "rank_bucket_scopes": groups,
         "ranks": ranks,
+        "implementations": implementations,
         "warnings": sorted(set(warnings)),
     }
 
@@ -340,7 +352,7 @@ def _deduplicate_scheduler_results(results, warnings):
     return committed
 
 
-def _group_scope_metrics(invocations, committed):
+def _group_scope_metrics(invocations, committed, implementation_ids):
     grouped = defaultdict(list)
     for manifest, invocation in invocations:
         metadata = invocation.metadata
@@ -354,10 +366,17 @@ def _group_scope_metrics(invocations, committed):
     rows = []
     for (scope, rank_label, bucket), values in sorted(grouped.items()):
         all_events = [event for _, inv in values for event in inv.gpu_events]
+        exclusive_events = [
+            event for _, inv in values for event in inv.exclusive_gpu_events
+        ]
         elapsed_us = interval_union_us(
             (event.start_us, event.end_us) for event in all_events
         )
         summed_us = sum(event.duration_us for event in all_events)
+        exclusive_elapsed_us = interval_union_us(
+            (event.start_us, event.end_us) for event in exclusive_events
+        )
+        exclusive_summed_us = sum(event.duration_us for event in exclusive_events)
         invocation_elapsed_us = [
             interval_union_us(
                 (event.start_us, event.end_us) for event in inv.gpu_events
@@ -385,7 +404,9 @@ def _group_scope_metrics(invocations, committed):
                 "invocations": len(values),
                 "committed_tokens": committed_tokens,
                 "gpu_elapsed_ms": elapsed_us / 1000.0,
+                "exclusive_gpu_elapsed_ms": exclusive_elapsed_us / 1000.0,
                 "summed_gpu_work_ms": summed_us / 1000.0,
+                "exclusive_summed_gpu_work_ms": exclusive_summed_us / 1000.0,
                 "overlap_ms": max(0.0, summed_us - elapsed_us) / 1000.0,
                 "gpu_service_ms_per_committed_token": _divide(
                     elapsed_us / 1000.0, committed_tokens
@@ -393,6 +414,7 @@ def _group_scope_metrics(invocations, committed):
                 "request_weighted_gpu_ms_per_committed_token": _divide(
                     request_weighted_us / 1000.0, committed_tokens
                 ),
+                "implementation_ids": implementation_ids.get((rank_label, scope), []),
                 "top_gpu_symbols": [
                     {"symbol": symbol, "summed_gpu_work_ms": duration / 1000.0}
                     for symbol, duration in sorted(
@@ -402,6 +424,61 @@ def _group_scope_metrics(invocations, committed):
             }
         )
     return rows
+
+
+def _implementation_ids_by_rank_scope(records):
+    result = defaultdict(set)
+    for manifest, record in records:
+        result[(manifest.get("rank_label", "unknown"), record.get("scope"))].add(
+            record["implementation_id"]
+        )
+    return {key: sorted(value) for key, value in result.items()}
+
+
+def _implementation_report(records, groups):
+    grouped_records = defaultdict(list)
+    for manifest, record in records:
+        grouped_records[record["implementation_id"]].append((manifest, record))
+
+    symbols_by_rank_scope = defaultdict(dict)
+    for group in groups:
+        key = (group["rank_label"], group["scope"])
+        for item in group["top_gpu_symbols"]:
+            symbols_by_rank_scope[key][item["symbol"]] = (
+                symbols_by_rank_scope[key].get(item["symbol"], 0.0)
+                + item["summed_gpu_work_ms"]
+            )
+
+    implementations = []
+    for implementation_id, values in sorted(grouped_records.items()):
+        first = dict(values[0][1])
+        first.pop("event", None)
+        first.pop("record_id", None)
+        first.pop("monotonic_time_ns", None)
+        observed = defaultdict(float)
+        observed_on_ranks = set()
+        for manifest, record in values:
+            rank = manifest.get("rank_label", "unknown")
+            observed_on_ranks.add(rank)
+            for symbol, duration in symbols_by_rank_scope[
+                (rank, record.get("scope"))
+            ].items():
+                observed[symbol] += duration
+        expected = [value.lower() for value in first.get("expected_symbols", [])]
+        first["observed_on_ranks"] = sorted(observed_on_ranks)
+        first["observed_matching_symbols"] = [
+            symbol
+            for symbol in sorted(observed)
+            if any(fragment in symbol.lower() for fragment in expected)
+        ]
+        first["top_observed_gpu_symbols"] = [
+            {"symbol": symbol, "summed_gpu_work_ms": duration}
+            for symbol, duration in sorted(
+                observed.items(), key=lambda item: item[1], reverse=True
+            )[:10]
+        ]
+        implementations.append(first)
+    return implementations
 
 
 def _aggregate_scope_metrics(groups):
@@ -464,18 +541,19 @@ def _markdown_report(report: dict[str, Any]) -> str:
         f"GPU event attribution coverage: {ratio_text}. Committed tokens: "
         f"{report['normalization']['committed_tokens']}.",
         "",
-        "| Scope | Rank | Batch bucket | GPU elapsed ms | Summed work ms | "
+        "| Scope | Rank | Batch bucket | GPU elapsed ms | Exclusive GPU ms | Summed work ms | "
         "Service ms/committed token | Request-weighted ms/committed token |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in report["rank_bucket_scopes"]:
         lines.append(
-            "| {scope} | {rank} | {bucket} | {elapsed:.3f} | {work:.3f} | "
+            "| {scope} | {rank} | {bucket} | {elapsed:.3f} | {exclusive:.3f} | {work:.3f} | "
             "{service} | {weighted} |".format(
                 scope=row["scope"],
                 rank=row["rank_label"],
                 bucket=row["batch_bucket"],
                 elapsed=row["gpu_elapsed_ms"],
+                exclusive=row["exclusive_gpu_elapsed_ms"],
                 work=row["summed_gpu_work_ms"],
                 service=_format_optional(row["gpu_service_ms_per_committed_token"]),
                 weighted=_format_optional(

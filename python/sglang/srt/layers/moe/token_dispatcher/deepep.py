@@ -27,6 +27,10 @@ from sglang.srt.layers.moe.utils import (
     get_deepep_output_dtype,
     is_tbo_enabled,
 )
+from sglang.srt.observability.profile_scope import (
+    profile_scope,
+    record_profile_impl,
+)
 from sglang.srt.utils import (
     get_bool_env_var,
     get_cuda_version,
@@ -550,45 +554,57 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         previous_event,
     ):
         buffer = self._get_buffer()
-        (
-            num_tokens_per_rank,
-            num_tokens_per_rdma_rank,
-            num_tokens_per_expert,
-            is_token_in_rank,
-            previous_event,
-        ) = buffer.get_dispatch_layout(
-            topk_ids,
-            self.num_experts,
-            previous_event=previous_event,
-            async_finish=self.async_finish,
-            allocate_on_comm_stream=previous_event is not None,
+        record_profile_impl(
+            "model.collective",
+            "deep_ep.normal.dispatch",
+            source_objects=(type(buffer),),
+            expected_symbols=("get_dispatch_layout", "dispatch"),
+            loaded_modules=("deep_ep",),
+            conditions={"operation": "moe_dispatch", "mode": "normal"},
         )
-        # FIXME: `handle` should be transmitted with tokens from dispatch to combine.
-        # However, doing this would incur an unknown synchronization error, but keeping
-        # `handle` as a member variable works.
+        with profile_scope(
+            "model.collective", operation="moe_dispatch", backend="deep_ep"
+        ):
+            (
+                num_tokens_per_rank,
+                num_tokens_per_rdma_rank,
+                num_tokens_per_expert,
+                is_token_in_rank,
+                previous_event,
+            ) = buffer.get_dispatch_layout(
+                topk_ids,
+                self.num_experts,
+                previous_event=previous_event,
+                async_finish=self.async_finish,
+                allocate_on_comm_stream=previous_event is not None,
+            )
+            # FIXME: `handle` should be transmitted with tokens from dispatch to combine.
+            # However, doing this would incur an unknown synchronization error, but keeping
+            # `handle` as a member variable works.
 
-        _deepep_precompile_tp_barrier()
-        (
-            recv_x,
-            recv_topk_ids,
-            recv_topk_weights,
-            num_recv_tokens_per_expert,
-            self.handle,
-            event,
-        ) = buffer.dispatch(
-            x,
-            topk_idx=topk_ids,
-            topk_weights=topk_weights,
-            num_tokens_per_rank=num_tokens_per_rank,
-            num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
-            is_token_in_rank=is_token_in_rank,
-            num_tokens_per_expert=num_tokens_per_expert,
-            previous_event=previous_event,
-            async_finish=self.async_finish,
-            allocate_on_comm_stream=(previous_event is not None) and self.async_finish,
-            expert_alignment=128 if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM else 1,
-            config=DeepEPConfig.get_instance().normal_dispatch_config,
-        )
+            _deepep_precompile_tp_barrier()
+            (
+                recv_x,
+                recv_topk_ids,
+                recv_topk_weights,
+                num_recv_tokens_per_expert,
+                self.handle,
+                event,
+            ) = buffer.dispatch(
+                x,
+                topk_idx=topk_ids,
+                topk_weights=topk_weights,
+                num_tokens_per_rank=num_tokens_per_rank,
+                num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
+                is_token_in_rank=is_token_in_rank,
+                num_tokens_per_expert=num_tokens_per_expert,
+                previous_event=previous_event,
+                async_finish=self.async_finish,
+                allocate_on_comm_stream=(previous_event is not None)
+                and self.async_finish,
+                expert_alignment=128 if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM else 1,
+                config=DeepEPConfig.get_instance().normal_dispatch_config,
+            )
         get_global_expert_distribution_recorder().on_deepep_dispatch_normal(
             num_recv_tokens_per_expert,
             num_tokens_per_rank=num_tokens_per_rank,
@@ -628,15 +644,26 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
 
     def _combine_core(self, x: torch.Tensor, previous_event):
         buffer = self._get_buffer()
-        _deepep_precompile_tp_barrier()
-        combined_x, _, event = buffer.combine(
-            x,
-            self.handle,
-            async_finish=self.async_finish,
-            previous_event=previous_event,
-            allocate_on_comm_stream=previous_event is not None,
-            config=DeepEPConfig.get_instance().normal_combine_config,
+        record_profile_impl(
+            "model.collective",
+            "deep_ep.normal.combine",
+            source_objects=(type(buffer),),
+            expected_symbols=("combine",),
+            loaded_modules=("deep_ep",),
+            conditions={"operation": "moe_combine", "mode": "normal"},
         )
+        with profile_scope(
+            "model.collective", operation="moe_combine", backend="deep_ep"
+        ):
+            _deepep_precompile_tp_barrier()
+            combined_x, _, event = buffer.combine(
+                x,
+                self.handle,
+                async_finish=self.async_finish,
+                previous_event=previous_event,
+                allocate_on_comm_stream=previous_event is not None,
+                config=DeepEPConfig.get_instance().normal_combine_config,
+            )
         return combined_x, event
 
     def _get_buffer(self):
@@ -745,26 +772,37 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         )
 
         buffer = self._get_buffer()
-        _deepep_precompile_tp_barrier()
-        packed_recv_hidden, self.packed_recv_count, self.handle, event, hook = (
-            buffer.low_latency_dispatch(
-                hidden_states,
-                topk_ids,
-                self.num_max_dispatch_tokens_per_rank,
-                self.num_experts,
-                use_fp8=self.use_fp8,
-                **(dict(topk_weights=topk_weights) if _is_npu else dict()),
-                **(dict(use_nvfp4=True) if self.use_nvfp4 else dict()),
-                **(
-                    dict(x_global_scale=input_global_scale)
-                    if input_global_scale is not None
-                    else dict()
-                ),
-                async_finish=not self.return_recv_hook,
-                return_recv_hook=self.return_recv_hook,
-                **fp8_deepgemm_scale_opts,
-            )
+        record_profile_impl(
+            "model.collective",
+            "deep_ep.low_latency.dispatch",
+            source_objects=(type(buffer),),
+            expected_symbols=("low_latency_dispatch",),
+            loaded_modules=("deep_ep",),
+            conditions={"operation": "moe_dispatch", "mode": "low_latency"},
         )
+        with profile_scope(
+            "model.collective", operation="moe_dispatch", backend="deep_ep"
+        ):
+            _deepep_precompile_tp_barrier()
+            packed_recv_hidden, self.packed_recv_count, self.handle, event, hook = (
+                buffer.low_latency_dispatch(
+                    hidden_states,
+                    topk_ids,
+                    self.num_max_dispatch_tokens_per_rank,
+                    self.num_experts,
+                    use_fp8=self.use_fp8,
+                    **(dict(topk_weights=topk_weights) if _is_npu else dict()),
+                    **(dict(use_nvfp4=True) if self.use_nvfp4 else dict()),
+                    **(
+                        dict(x_global_scale=input_global_scale)
+                        if input_global_scale is not None
+                        else dict()
+                    ),
+                    async_finish=not self.return_recv_hook,
+                    return_recv_hook=self.return_recv_hook,
+                    **fp8_deepgemm_scale_opts,
+                )
+            )
         return packed_recv_hidden, self.packed_recv_count, event, hook
 
     def combine_a(
@@ -825,17 +863,28 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         else:
             overlap_args_dict = {}
 
-        with ctx:
-            _deepep_precompile_tp_barrier()
-            combined_hidden_states, event, hook = buffer.low_latency_combine(
-                x=hidden_states,
-                topk_idx=topk_ids,
-                topk_weights=topk_weights,
-                handle=self.handle,
-                async_finish=not self.return_recv_hook,
-                return_recv_hook=self.return_recv_hook,
-                **overlap_args_dict,
-            )
+        record_profile_impl(
+            "model.collective",
+            "deep_ep.low_latency.combine",
+            source_objects=(type(buffer),),
+            expected_symbols=("low_latency_combine",),
+            loaded_modules=("deep_ep",),
+            conditions={"operation": "moe_combine", "mode": "low_latency"},
+        )
+        with profile_scope(
+            "model.collective", operation="moe_combine", backend="deep_ep"
+        ):
+            with ctx:
+                _deepep_precompile_tp_barrier()
+                combined_hidden_states, event, hook = buffer.low_latency_combine(
+                    x=hidden_states,
+                    topk_idx=topk_ids,
+                    topk_weights=topk_weights,
+                    handle=self.handle,
+                    async_finish=not self.return_recv_hook,
+                    return_recv_hook=self.return_recv_hook,
+                    **overlap_args_dict,
+                )
 
         self.packed_recv_count = self.handle = None
         return combined_hidden_states, event, hook

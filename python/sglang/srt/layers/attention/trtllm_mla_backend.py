@@ -38,6 +38,7 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMo
 from sglang.srt.model_executor.runner_backend_utils.tc_piecewise_cuda_graph import (
     is_in_tc_piecewise_cuda_graph,
 )
+from sglang.srt.observability.profile_scope import record_profile_impl
 from sglang.srt.runtime_context import get_buffer, get_parallel, get_server_args
 from sglang.srt.utils import is_flashinfer_available, is_float4_e2m1fn_x2
 
@@ -642,7 +643,23 @@ class TRTLLMMLABackend(FlashInferMLAAttnBackend):
             seq_lens if seq_lens.dtype == torch.int32 else seq_lens.to(torch.int32)
         )
         extra_kwargs = {"backend": self.backend} if self.backend != "trtllm-gen" else {}
-        return flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla(
+        decode_kernel = flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla
+        record_profile_impl(
+            "model.attention.mla",
+            f"flashinfer.trtllm_mla.decode:{self.backend}",
+            source_objects=(type(self), decode_kernel),
+            expected_symbols=(
+                "trtllm_batch_decode_with_kv_cache_mla",
+                "fmha_mla",
+            ),
+            loaded_modules=("flashinfer",),
+            conditions={
+                "operation": "decode_or_verify",
+                "backend": self.backend,
+                "kv_cache_dtype": str(self.data_type),
+            },
+        )
+        return decode_kernel(
             query=query,
             kv_cache=kv_cache,
             workspace_buffer=self.workspace_buffer,
@@ -680,7 +697,20 @@ class TRTLLMMLABackend(FlashInferMLAAttnBackend):
         q_scale = k_scale = v_scale = 1.0
         if self.data_type == torch.float8_e4m3fn:
             q, k, v, k_scale, v_scale = _quantize_fp8_qkv(q, k, v, layer)
-        return flashinfer.prefill.trtllm_ragged_attention_deepseek(
+        prefill_kernel = flashinfer.prefill.trtllm_ragged_attention_deepseek
+        record_profile_impl(
+            "model.attention.mla",
+            "flashinfer.trtllm_mla.prefill",
+            source_objects=(type(self), prefill_kernel),
+            expected_symbols=("trtllm_ragged_attention_deepseek", "fmha"),
+            loaded_modules=("flashinfer",),
+            conditions={
+                "operation": "prefill",
+                "backend": self.backend,
+                "kv_cache_dtype": str(self.data_type),
+            },
+        )
+        return prefill_kernel(
             query=q,
             key=k,
             value=v,

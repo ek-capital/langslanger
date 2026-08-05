@@ -8,10 +8,15 @@ from sglang.srt.distributed.parallel_state_wrapper import ParallelState
 from sglang.srt.observability.profile_scope import (
     batch_bucket,
     profile_scope,
+    record_profile_impl,
     record_profile_step,
     start_profile_recording,
     stop_profile_recording,
 )
+
+
+def _source_for_profile_test():
+    return None
 
 
 class TestProfileScope(unittest.TestCase):
@@ -63,6 +68,32 @@ class TestProfileScope(unittest.TestCase):
             )
             with self.assertRaises(TypeError):
                 record_profile_step("bad", tensor=object())
+
+    def test_records_explicit_implementation_and_source_once(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            start_profile_recording(
+                output_dir=temporary_dir,
+                profile_id="run",
+                profile_prefix="",
+                stage=None,
+                ps=ParallelState.trivial(),
+            )
+            for _ in range(2):
+                record_profile_impl(
+                    "model.attention.kda",
+                    "test_kernel",
+                    source_objects=(_source_for_profile_test,),
+                    expected_symbols=("test_kernel_symbol",),
+                    conditions={"layer": 1},
+                )
+            path = stop_profile_recording()
+            records = [json.loads(line) for line in Path(path).read_text().splitlines()]
+            implementations = [
+                record for record in records if record["event"] == "implementation"
+            ]
+            self.assertEqual(len(implementations), 1)
+            self.assertEqual(implementations[0]["implementation"], "test_kernel")
+            self.assertTrue(implementations[0]["sources"][0]["git_blob"])
 
 
 if __name__ == "__main__":

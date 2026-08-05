@@ -49,6 +49,23 @@ class TestProfileReport(unittest.TestCase):
                     "scheduler_iteration": 3,
                     "committed_tokens": 18,
                 },
+                {
+                    "event": "implementation",
+                    "implementation_id": "impl-1",
+                    "scope": "spec.verify",
+                    "implementation": "synthetic.verify",
+                    "conditions": {"operation": "verify"},
+                    "expected_symbols": ["kernel_"],
+                    "sources": [
+                        {
+                            "path": "kernel.cu",
+                            "sha256": "sha256",
+                            "git_blob": "blob",
+                        }
+                    ],
+                    "loaded_libraries": [],
+                    "attribution_source": "explicit_dispatch_declaration",
+                },
             ]
             steps_path.write_text(
                 "".join(json.dumps(record) + "\n" for record in steps)
@@ -77,6 +94,11 @@ class TestProfileReport(unittest.TestCase):
                 report["coverage"]["gpu_event_attribution_ratio"], 2 / 3
             )
             self.assertIsNone(report["scopes"][0]["distributed_critical_path_ms"])
+            self.assertEqual(row["implementation_ids"], ["impl-1"])
+            self.assertEqual(
+                report["implementations"][0]["observed_matching_symbols"],
+                ["kernel_a", "kernel_b"],
+            )
 
             json_path, markdown_path = write_profile_report(profile_dir)
             self.assertTrue(json_path.is_file())

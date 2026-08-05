@@ -8,6 +8,9 @@ from sglang.srt.observability.profile_graph_map import (
     analyze_graph_sqlite,
     write_graph_map,
 )
+from sglang.test.ci.ci_register import register_cpu_ci
+
+register_cpu_ci(est_time=2, suite="base-a-test-cpu")
 
 
 class TestProfileGraphMap(unittest.TestCase):

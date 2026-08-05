@@ -46,7 +46,7 @@ register_cuda_ci(est_time=20, stage="base-b", runner_config="1-gpu-small")
 
 _BYTES_PER_TOKEN = _NOPE_ROPE_STRIDE + _SCALE_STRIDE
 _HEAD_DIM_QK = 512
-_HEAD_DIM_V = 448
+_HEAD_DIM_V = 512
 
 
 class TestBucketArithmetic(unittest.TestCase):
@@ -95,13 +95,25 @@ class _Recorders:
     """Replace the CUTLASS kernel and the Triton fallback with recorders."""
 
     def __enter__(self):
-        self.decode_calls = []
+        self.flashinfer_calls = []
         self.triton_calls = []
-        self._fi = fi.sparse_mla_sm120_decode_dsv4
+        self._fi = fi._sparse_mla_sm120_paged_attention
         self._tr = tmod.flash_mla_sparse_decode_triton
 
-        def decode(**kwargs):
-            self.decode_calls.append(kwargs)
+        def paged_attention(
+            q, kv_cache, indices, output, out_lse, sm_scale, **kwargs
+        ):
+            self.flashinfer_calls.append(
+                {
+                    "q": q,
+                    "kv_cache": kv_cache,
+                    "indices": indices,
+                    "output": output,
+                    "out_lse": out_lse,
+                    "sm_scale": sm_scale,
+                    **kwargs,
+                }
+            )
             return None
 
         def triton(q, k_cache, indices, topk_length, *args, **kwargs):
@@ -113,12 +125,12 @@ class _Recorders:
                 torch.zeros(b, h, dtype=torch.float32),
             )
 
-        fi.sparse_mla_sm120_decode_dsv4 = decode
+        fi._sparse_mla_sm120_paged_attention = paged_attention
         tmod.flash_mla_sparse_decode_triton = triton
         return self
 
     def __exit__(self, *exc):
-        fi.sparse_mla_sm120_decode_dsv4 = self._fi
+        fi._sparse_mla_sm120_paged_attention = self._fi
         tmod.flash_mla_sparse_decode_triton = self._tr
         return False
 
@@ -155,9 +167,9 @@ class TestDispatchOnCall(unittest.TestCase):
 
     def test_topk_192_reaches_the_kernel_padded_to_512(self):
         rec, _ = _call(192)
-        self.assertEqual(len(rec.decode_calls), 1)
+        self.assertEqual(len(rec.flashinfer_calls), 1)
         self.assertEqual(rec.triton_calls, [])
-        kwargs = rec.decode_calls[0]
+        kwargs = rec.flashinfer_calls[0]
         self.assertEqual(kwargs["indices"].shape[-1], 512)
         self.assertTrue(
             fi._decode_dsv4_dispatchable(
@@ -168,14 +180,14 @@ class TestDispatchOnCall(unittest.TestCase):
 
     def test_the_padding_is_the_minus_one_skip_sentinel(self):
         rec, _ = _call(192)
-        idx = rec.decode_calls[0]["indices"]
+        idx = rec.flashinfer_calls[0]["indices"]
         self.assertTrue(bool((idx[:, :192] == 0).all()), "real indices were altered")
         self.assertTrue(bool((idx[:, 192:] == -1).all()), "pad is not the sentinel")
 
     def test_the_scan_is_capped_at_the_true_width(self):
         """Without topk_length the kernel would read the -1 padding."""
         rec, _ = _call(192)
-        capped = rec.decode_calls[0]["topk_length"]
+        capped = rec.flashinfer_calls[0]["topk_length"]
         self.assertIsNotNone(capped, "topk_length must be synthesised by the pad")
         self.assertEqual(capped.dtype, torch.int32)
         self.assertEqual(capped.tolist(), [192])
@@ -183,31 +195,34 @@ class TestDispatchOnCall(unittest.TestCase):
     def test_an_instantiated_width_is_passed_through_untouched(self):
         """Neutrality: the pre-port behaviour for every width that worked."""
         rec, _ = _call(512)
-        self.assertEqual(len(rec.decode_calls), 1)
-        self.assertEqual(rec.decode_calls[0]["indices"].shape[-1], 512)
+        self.assertEqual(len(rec.flashinfer_calls), 1)
+        self.assertEqual(rec.flashinfer_calls[0]["indices"].shape[-1], 512)
         self.assertIsNone(
-            rec.decode_calls[0]["topk_length"],
+            rec.flashinfer_calls[0]["topk_length"],
             "an already-instantiated width must not grow a synthetic cap",
         )
 
     def test_the_split_k_scratch_covers_the_padded_width(self):
         """mid_out/mid_lse are sized from the width the kernel actually scans."""
         rec, _ = _call(192)
-        kwargs = rec.decode_calls[0]
+        kwargs = rec.flashinfer_calls[0]
         self.assertEqual(kwargs["mid_out"].shape[2], 512 // 64)
         self.assertEqual(kwargs["mid_lse"].shape[2], 512 // 64)
 
     def test_an_undispatchable_geometry_falls_back_to_triton(self):
         """d_qk != 512 is out of the CUTLASS table at every topk width."""
         rec, out = _call(128, d_qk=256)
-        self.assertEqual(rec.decode_calls, [])
+        self.assertEqual(rec.flashinfer_calls, [])
         self.assertEqual(len(rec.triton_calls), 1)
         self.assertIsNotNone(out[0])
 
-    def test_a_batch_above_the_decode_maximum_falls_back_to_triton(self):
+    def test_a_batch_above_the_decode_maximum_uses_prefill_dispatch(self):
         rec, _ = _call(128, batch=fi._DECODE_MAX_TOKENS + 1)
-        self.assertEqual(rec.decode_calls, [])
-        self.assertEqual(len(rec.triton_calls), 1)
+        self.assertEqual(len(rec.flashinfer_calls), 1)
+        self.assertEqual(rec.triton_calls, [])
+        self.assertEqual(
+            rec.flashinfer_calls[0]["q"].shape[0], fi._DECODE_MAX_TOKENS + 1
+        )
 
     def test_an_uninstantiated_head_count_falls_back_to_triton(self):
         heads = next(
@@ -217,7 +232,7 @@ class TestDispatchOnCall(unittest.TestCase):
             and (h, 128) not in fi._DECODE_DSV4_DISPATCH
         )
         rec, _ = _call(128, heads=heads)
-        self.assertEqual(rec.decode_calls, [])
+        self.assertEqual(rec.flashinfer_calls, [])
         self.assertEqual(len(rec.triton_calls), 1)
 
     def test_the_fallback_gets_the_unpadded_indices(self):

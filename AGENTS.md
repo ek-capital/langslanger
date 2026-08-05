@@ -56,6 +56,48 @@ Keep LangSlanger changes easy to distinguish from upstream SGLang. Avoid
 unrelated cleanup in performance patches, retain upstream structure where
 practical, and make future rebases or cherry-picks straightforward.
 
+## SGLang drop-in compatibility
+
+Drop-in compatibility with the SGLang release identified in `README.md` is a
+hard repository invariant. Replacing an SGLang checkout, wheel, or container
+with LangSlanger must not require a user to rewrite an existing command,
+configuration file, Python import, deployment manifest, or API client.
+
+The product name is LangSlanger; the compatibility namespace remains SGLang.
+Agents MUST:
+
+- preserve the `sglang` Python package, `sglang` executable, `sglang serve`,
+  `sglang generate`, `sglang version`, and
+  `python -m sglang.launch_server`;
+- preserve every upstream option and alias, including its destination, action,
+  type, choices, `nargs`, default, deprecation behavior, and precedence between
+  command-line and configuration values;
+- preserve upstream configuration keys, `SGLANG_*` environment variables,
+  metrics, HTTP schemas, and operational defaults;
+- implement branded entry points such as `langslanger` as thin aliases over the
+  same parser and runtime rather than as a second copied implementation;
+- add new server options only under `--langslanger-*`, configuration fields
+  under `langslanger_*`, and environment variables under `LANGSLANGER_*`;
+- keep profiling, capture, tracing, and other overhead-producing additions
+  disabled until explicitly requested;
+- extend the upstream `ServerArgs` and launch paths in place; never maintain a
+  hand-copied mirror of upstream arguments;
+- retain upstream tests unchanged and add LangSlanger-specific tests
+  separately; and
+- treat a future upstream name collision as owned by upstream, renaming or
+  deprecating the LangSlanger addition without changing upstream semantics.
+
+Do not mass-replace `sglang` with `langslanger` in source paths, imports,
+protocol names, serialized class paths, CUDA symbols, metrics, or environment
+variables. Those names are compatibility interfaces and also keep upstream
+diffs reviewable.
+
+Before completing a change to CLI parsing, `ServerArgs`, configuration,
+entrypoints, packaging, or public APIs, run the focused LangSlanger identity
+tests plus the relevant upstream tests. A compatibility snapshot or baseline
+must never be changed merely to silence a failure. Stop and request maintainer
+direction before making an intentional compatibility break.
+
 ## Development style
 
 - Prefer the smallest implementation that answers a measured need.

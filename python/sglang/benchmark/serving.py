@@ -42,6 +42,11 @@ from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from sglang.benchmark.datasets import DatasetRow, get_dataset
 from sglang.benchmark.datasets.mooncake import get_mooncake_request_over_time
+from sglang.benchmark.datasets.speed_bench import (
+    SPEED_BENCH_REPO_ID,
+    SPEED_BENCH_REVISION,
+    SPEED_BENCH_SUITES,
+)
 from sglang.benchmark.utils import (
     get_tokenizer,
     parse_custom_headers,
@@ -1797,6 +1802,7 @@ async def benchmark(
             "dataset_name": args.dataset_name,
             "dataset_path": args.dataset_path or None,
             "dataset_sha256": getattr(args, "dataset_sha256", None),
+            "seed": args.seed,
             "request_rate": "trace" if use_trace_timestamps else request_rate,
             "max_concurrency": max_concurrency,
             "sharegpt_output_len": args.sharegpt_output_len,
@@ -1848,6 +1854,9 @@ async def benchmark(
         }
 
         if args.dataset_name.startswith("speed-bench"):
+            result["speed_bench_suite"] = SPEED_BENCH_SUITES[args.dataset_name]
+            result["speed_bench_repo_id"] = SPEED_BENCH_REPO_ID
+            result["speed_bench_revision"] = SPEED_BENCH_REVISION
             result["speed_bench_category"] = args.speed_bench_category
             result["speed_bench_output_len"] = args.speed_bench_output_len
 

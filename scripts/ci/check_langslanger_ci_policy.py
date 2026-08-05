@@ -20,6 +20,14 @@ OPT_IN_PR_WORKFLOWS = (
     "pr-test-arm64.yml",
     "pr-test-mlx.yml",
 )
+GATE_JOBS = {
+    "pr-test.yml": ("call-gate", ("run-ci",)),
+    "pr-test-extra.yml": ("call-gate", ("run-ci", "run-ci-extra")),
+    "pr-test-amd.yml": ("call-gate", ("run-ci",)),
+    "pr-test-amd-extra.yml": ("call-gate", ("run-ci", "run-ci-extra")),
+    "pr-test-arm64.yml": ("pr-gate", ("run-ci",)),
+    "pr-test-mlx.yml": ("pr-gate", ("run-ci",)),
+}
 UNSAFE_SKIPPED_GATE = (
     "needs.call-gate.result == 'success' || " "needs.call-gate.result == 'skipped'"
 )
@@ -87,6 +95,18 @@ def main() -> None:
         types = set(workflow["on"]["pull_request"].get("types", []))
         require("ready_for_review" in types, f"{name} misses ready_for_review")
         require("labeled" in types, f"{name} misses labeled")
+
+        gate_job, labels = GATE_JOBS[name]
+        caller_condition = workflow["jobs"][gate_job].get("if", "")
+        require(
+            "draft == false" in caller_condition,
+            f"{name} does not reject draft PRs at the caller",
+        )
+        for label in labels:
+            require(
+                f"'{label}'" in caller_condition,
+                f"{name} does not require {label!r} at the caller",
+            )
 
     for name in ("pr-test.yml", "pr-test-extra.yml", "pr-test-amd.yml"):
         source = (WORKFLOW_DIR / name).read_text(encoding="utf-8")

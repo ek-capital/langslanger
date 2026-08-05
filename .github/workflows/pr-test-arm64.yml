@@ -62,13 +62,23 @@ jobs:
 
   pr-gate:
     needs: check-changes
-    if: needs.check-changes.outputs.main_package == 'true'
+    if: |
+      needs.check-changes.outputs.main_package == 'true' &&
+      (
+        github.event_name != 'pull_request' ||
+        (
+          github.event.pull_request.draft == false &&
+          contains(github.event.pull_request.labels.*.name, 'run-ci')
+        )
+      )
     uses: ./.github/workflows/pr-gate.yml
     secrets: inherit
 
   build-test:
     needs: [check-changes, pr-gate]
-    if: needs.check-changes.outputs.main_package == 'true'
+    if: |
+      needs.check-changes.outputs.main_package == 'true' &&
+      needs.pr-gate.result == 'success'
     runs-on: ubuntu-24.04-arm
     steps:
       - name: Checkout repository

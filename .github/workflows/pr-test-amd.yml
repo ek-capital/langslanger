@@ -121,7 +121,15 @@ concurrency:
 
 jobs:
   call-gate:
-    if: github.event_name != 'schedule'
+    if: |
+      github.event_name != 'schedule' &&
+      (
+        github.event_name != 'pull_request' ||
+        (
+          github.event.pull_request.draft == false &&
+          contains(github.event.pull_request.labels.*.name, 'run-ci')
+        )
+      )
     uses: ./.github/workflows/pr-gate.yml
     secrets: inherit
   check-changes:

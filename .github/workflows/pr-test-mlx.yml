@@ -55,7 +55,15 @@ jobs:
   # ==================== PR Gate ==================== #
   pr-gate:
     needs: check-changes
-    if: needs.check-changes.outputs.changes_exist == 'true'
+    if: |
+      needs.check-changes.outputs.changes_exist == 'true' &&
+      (
+        github.event_name != 'pull_request' ||
+        (
+          github.event.pull_request.draft == false &&
+          contains(github.event.pull_request.labels.*.name, 'run-ci')
+        )
+      )
     uses: ./.github/workflows/pr-gate.yml
     secrets: inherit
 

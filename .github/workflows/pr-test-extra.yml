@@ -110,7 +110,17 @@ jobs:
   # green instead of dispatching a runner or producing a false-red failure.
   call-gate:
     needs: check-changes
-    if: github.event_name != 'schedule' && needs.check-changes.result == 'success'
+    if: |
+      github.event_name != 'schedule' &&
+      needs.check-changes.result == 'success' &&
+      (
+        github.event_name != 'pull_request' ||
+        (
+          github.event.pull_request.draft == false &&
+          contains(github.event.pull_request.labels.*.name, 'run-ci') &&
+          contains(github.event.pull_request.labels.*.name, 'run-ci-extra')
+        )
+      )
     uses: ./.github/workflows/pr-gate.yml
     with:
       require-run-ci: true

@@ -26,6 +26,14 @@ OPT_IN_PR_WORKFLOWS = (
     "pr-test-arm64.yml",
     "pr-test-mlx.yml",
 )
+GATE_JOBS = {
+    "pr-test.yml": ("call-gate", ("run-ci",)),
+    "pr-test-extra.yml": ("call-gate", ("run-ci", "run-ci-extra")),
+    "pr-test-amd.yml": ("call-gate", ("run-ci",)),
+    "pr-test-amd-extra.yml": ("call-gate", ("run-ci", "run-ci-extra")),
+    "pr-test-arm64.yml": ("pr-gate", ("run-ci",)),
+    "pr-test-mlx.yml": ("pr-gate", ("run-ci",)),
+}
 
 WORKFLOWS = {
     "pr-test.yml": {
@@ -134,6 +142,15 @@ class TestLangSlangerCIHardwarePolicy(unittest.TestCase):
                 )["on"]["pull_request"]
                 self.assertIn("ready_for_review", pull_request["types"])
                 self.assertIn("labeled", pull_request["types"])
+
+    def test_opt_in_is_enforced_by_reusable_workflow_callers(self):
+        for workflow_name, (gate_job, labels) in GATE_JOBS.items():
+            with self.subTest(workflow=workflow_name):
+                workflow = load_yaml(ROOT / ".github" / "workflows" / workflow_name)
+                condition = workflow["jobs"][gate_job].get("if", "")
+                self.assertIn("draft == false", condition)
+                for label in labels:
+                    self.assertIn(f"'{label}'", condition)
 
     def test_full_ci_is_explicitly_opt_in_everywhere(self):
         for workflow_name, policy in WORKFLOWS.items():

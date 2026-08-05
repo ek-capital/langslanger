@@ -98,15 +98,17 @@ jobs:
   # The shared gate requires both `run-ci` and `run-ci-extra`. Drafts and PRs
   # without those opt-in labels skip cleanly without consuming AMD runners.
   #
-  # The job-level `if` only filters the `labeled` event type so that adding an
-  # unrelated label doesn't dispatch a full run; the actual label-presence
-  # gate is enforced at runtime inside pr-gate.yml.
+  # Gate at the caller as well as inside the reusable workflow. GitHub reports
+  # a reusable workflow with only skipped inner jobs as successful, which can
+  # otherwise dispatch hardware jobs without the opt-in labels.
   call-gate:
     if: |
       github.event_name != 'pull_request' ||
-      github.event.action != 'labeled' ||
-      github.event.label.name == 'run-ci' ||
-      github.event.label.name == 'run-ci-extra'
+      (
+        github.event.pull_request.draft == false &&
+        contains(github.event.pull_request.labels.*.name, 'run-ci') &&
+        contains(github.event.pull_request.labels.*.name, 'run-ci-extra')
+      )
     uses: ./.github/workflows/pr-gate.yml
     with:
       require-run-ci: true

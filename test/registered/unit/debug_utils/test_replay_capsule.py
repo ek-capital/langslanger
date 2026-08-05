@@ -11,6 +11,9 @@ from sglang.srt.debug_utils.replay_capsule import (
     configure_replay_capture,
 )
 from sglang.srt.debug_utils.replay_runner import run_replay
+from sglang.test.ci.ci_register import register_cpu_ci
+
+register_cpu_ci(est_time=2, suite="base-a-test-cpu")
 
 
 def _candidate(inputs, read_only_state, mutable_state, metadata):

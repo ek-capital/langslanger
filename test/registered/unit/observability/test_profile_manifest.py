@@ -11,6 +11,9 @@ from sglang.srt.observability.profile_manifest import (
     profile_rank_label,
     write_profile_manifest,
 )
+from sglang.test.ci.ci_register import register_cpu_ci
+
+register_cpu_ci(est_time=2, suite="base-a-test-cpu")
 
 
 @dataclass

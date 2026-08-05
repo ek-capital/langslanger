@@ -11,6 +11,7 @@ on:
   schedule:
     - cron: '0 11,23 * * *'  # Run 2x daily, 12h apart, off PR-push peaks
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
   workflow_dispatch:
     inputs:
       force_continue_on_error:
@@ -138,7 +139,7 @@ jobs:
       github.event_name == 'pull_request' &&
       inputs.test_parallel_dispatch != true &&
       (needs.check-changes.outputs.main_package == 'true' || needs.check-changes.outputs.sgl_kernel == 'true') &&
-      (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped')
+      needs.call-gate.result == 'success'
     runs-on: ubuntu-latest
     outputs:
       base_a_result: ${{ steps.wait.outputs.result }}
@@ -168,7 +169,7 @@ jobs:
       inputs.test_parallel_dispatch != true &&
       (needs.check-changes.outputs.main_package == 'true' || needs.check-changes.outputs.sgl_kernel == 'true') &&
       (needs.wait-for-base-a.result == 'success' || needs.wait-for-base-a.result == 'skipped') &&
-      (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped')
+      needs.call-gate.result == 'success'
     runs-on: ubuntu-latest
     outputs:
       base_b_result: ${{ steps.wait.outputs.result }}

@@ -3,12 +3,9 @@ name: PR Test Extra
 #
 # Adds runtime to a PR only when the author asks for it: the PR must carry
 # BOTH `run-ci` (basic-CI prerequisite) and `run-ci-extra` (explicit opt-in
-# to this workflow). The label check happens at runtime in pr-gate.yml via
-# live `gh pr view --json labels`, so reruns after adding the labels via
-# slash command pick up the new label set (workflow-level `if` checks would
-# read the frozen event payload, which never updates on rerun). The same
-# job graph runs unconditionally on workflow_dispatch / workflow_call so it
-# can be triggered manually or chained from another workflow.
+# to this workflow). The shared gate skips cleanly until those labels are in
+# the pull-request event. `labeled` and `ready_for_review` events re-evaluate
+# the gate, while workflow_dispatch / workflow_call remain explicit bypasses.
 #
 # Stages: extra-a (1-/2-gpu) and extra-b (4-/8-gpu) caller stubs reuse
 # `_pr-test-stage.yml` and `_pr-test-check-changes.yml` from pr-test.yml.
@@ -19,7 +16,7 @@ on:
     # is added after the latest push — otherwise GHA leaves the stale
     # skipped run in place and there's no way to enable extra without
     # another push. See check-changes.if below for the matching guard.
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
   workflow_dispatch:
     inputs:
       force_continue_on_error:
@@ -86,14 +83,9 @@ permissions:
 
 jobs:
   # =============================================== check changes ====================================================
-  # The actual `run-ci` + `run-ci-extra` label gate now lives in the
-  # `call-gate` job below, which calls pr-gate.yml. pr-gate.yml live-fetches
-  # the PR's current labels at runtime, so a rerun (e.g. via
-  # /tag-and-rerun-ci extra, which adds labels via GITHUB_TOKEN — these
-  # don't cascade-trigger labeled events) picks up the new label set and
-  # passes. The previous workflow-level `if` checked the frozen event
-  # payload, which never updates on rerun and made the slash-add-label flow
-  # impossible to recover.
+# The actual `run-ci` + `run-ci-extra` label gate lives in the `call-gate`
+# job below. Drafts and missing labels produce a skipped gate, not a failed
+# check; adding either gating label creates a fresh event with current labels.
   #
   # We only keep one filter here: for `labeled` events, only proceed if the
   # just-added label is one of the gating labels. This prevents every
@@ -113,10 +105,9 @@ jobs:
     secrets: inherit
 
   # =============================================== PR Gate ====================================================
-  # Runtime live-fetch gate. Mirrors pr-test.yml's call-gate, but additionally
-  # requires `run-ci-extra`. Failure here cascades down to every test job
-  # via `needs`, so the workflow ends with one red gate job (~30s) plus a
-  # row of skipped test jobs instead of consuming a runner.
+  # The shared gate skips drafts and PRs without both opt-in labels. Hardware
+  # jobs require a successful gate on PR events, so skipped gates stay cheap and
+  # green instead of dispatching a runner or producing a false-red failure.
   call-gate:
     needs: check-changes
     if: github.event_name != 'schedule' && needs.check-changes.result == 'success'
@@ -131,7 +122,7 @@ jobs:
     needs: [check-changes, call-gate]
     if: |
       needs.check-changes.result == 'success' &&
-      (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') &&
+      (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) &&
       needs.check-changes.outputs.sgl_kernel == 'true'
     uses: ./.github/workflows/_pr-test-sgl-kernel-build.yml
     with:
@@ -145,7 +136,7 @@ jobs:
   # =============================================== extra-a (1-/2-gpu) ===============================================
   extra-a-test-1-gpu-small:
     needs: [check-changes, call-gate, sgl-kernel-build-wheels]
-    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
+    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: extra-a-test-1-gpu-small
@@ -158,7 +149,7 @@ jobs:
 
   extra-a-test-1-gpu-large:
     needs: [check-changes, call-gate, sgl-kernel-build-wheels]
-    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
+    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: extra-a-test-1-gpu-large
@@ -172,7 +163,7 @@ jobs:
 
   extra-a-test-2-gpu-large:
     needs: [check-changes, call-gate, sgl-kernel-build-wheels]
-    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
+    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: extra-a-test-2-gpu-large
@@ -186,7 +177,7 @@ jobs:
   # =============================================== extra-b (4-/8-gpu) ===============================================
   extra-b-test-4-gpu-h100:
     needs: [check-changes, call-gate, sgl-kernel-build-wheels]
-    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
+    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: extra-b-test-4-gpu-h100
@@ -199,7 +190,7 @@ jobs:
 
   extra-b-test-4-gpu-b200:
     needs: [check-changes, call-gate, sgl-kernel-build-wheels]
-    if: ${{ !failure() && !cancelled() && inputs.enable_upstream_full_ci == true && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
+    if: ${{ !failure() && !cancelled() && inputs.enable_upstream_full_ci == true && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: extra-b-test-4-gpu-b200
@@ -213,7 +204,7 @@ jobs:
 
   extra-b-test-8-gpu-h200:
     needs: [check-changes, call-gate, sgl-kernel-build-wheels]
-    if: ${{ !failure() && !cancelled() && inputs.enable_upstream_full_ci == true && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
+    if: ${{ !failure() && !cancelled() && inputs.enable_upstream_full_ci == true && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: extra-b-test-8-gpu-h200
@@ -226,7 +217,7 @@ jobs:
 
   extra-b-test-deepep-4-gpu-h100:
     needs: [check-changes, call-gate, sgl-kernel-build-wheels]
-    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
+    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: extra-b-test-deepep-4-gpu-h100
@@ -239,7 +230,7 @@ jobs:
 
   extra-b-test-deepep-4-gpu-b200:
     needs: [check-changes, call-gate, sgl-kernel-build-wheels]
-    if: ${{ !failure() && !cancelled() && inputs.enable_upstream_full_ci == true && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
+    if: ${{ !failure() && !cancelled() && inputs.enable_upstream_full_ci == true && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: extra-b-test-deepep-4-gpu-b200
@@ -253,7 +244,7 @@ jobs:
 
   extra-b-test-deepep-8-gpu-h200:
     needs: [check-changes, call-gate, sgl-kernel-build-wheels]
-    if: ${{ !failure() && !cancelled() && inputs.enable_upstream_full_ci == true && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
+    if: ${{ !failure() && !cancelled() && inputs.enable_upstream_full_ci == true && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: extra-b-test-deepep-8-gpu-h200

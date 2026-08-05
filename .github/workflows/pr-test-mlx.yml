@@ -3,6 +3,7 @@ name: PR Test (MLX)
 on:
   pull_request:
     branches: [ main ]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
   workflow_dispatch:
     inputs:
       # target_stage is the job id (e.g. stage-b-e2e-test-mlx), distinct from

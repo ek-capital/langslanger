@@ -5,6 +5,7 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
   workflow_dispatch:
   workflow_call:
     inputs:
@@ -76,13 +77,13 @@ jobs:
           ref: ${{ inputs.ref || github.ref }}
 
       - name: Build container
+        env:
+          SGLANG_SOURCE_REPO: ${{ github.event.pull_request.head.repo.clone_url || format('{0}/{1}.git', github.server_url, github.repository) }}
+          SGLANG_SOURCE_REF: ${{ github.event.pull_request.head.sha || inputs.ref || github.sha }}
         run: |
-          PR_REPO=${{ github.event.pull_request.head.repo.clone_url }}
-          PR_HEAD_REF=${{ github.head_ref }}
-
           docker build \
-            ${PR_REPO:+--build-arg SGLANG_REPO=$PR_REPO} \
-            ${PR_HEAD_REF:+--build-arg VER_SGLANG=$PR_HEAD_REF} \
+            --build-arg SGLANG_REPO="$SGLANG_SOURCE_REPO" \
+            --build-arg VER_SGLANG="$SGLANG_SOURCE_REF" \
             . -f docker/arm64.Dockerfile -t sglang_arm64 --no-cache
 
       - name: Run container

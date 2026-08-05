@@ -12,6 +12,20 @@ register_cpu_ci(est_time=2, suite="base-a-test-cpu")
 
 ROOT = Path(__file__).resolve().parents[3]
 FULL_CI_EXPRESSION = "inputs.enable_upstream_full_ci == true"
+MANUAL_ONLY_WORKFLOWS = (
+    "pr-test-musa.yml",
+    "pr-test-npu.yml",
+    "pr-test-xeon.yml",
+    "pr-test-xpu.yml",
+)
+OPT_IN_PR_WORKFLOWS = (
+    "pr-test.yml",
+    "pr-test-extra.yml",
+    "pr-test-amd.yml",
+    "pr-test-amd-extra.yml",
+    "pr-test-arm64.yml",
+    "pr-test-mlx.yml",
+)
 
 WORKFLOWS = {
     "pr-test.yml": {
@@ -59,6 +73,56 @@ def load_yaml(path: Path):
 
 
 class TestLangSlangerCIHardwarePolicy(unittest.TestCase):
+    def test_unavailable_hardware_workflows_are_manual_only(self):
+        for workflow_name in MANUAL_ONLY_WORKFLOWS:
+            with self.subTest(workflow=workflow_name):
+                triggers = load_yaml(ROOT / ".github" / "workflows" / workflow_name)[
+                    "on"
+                ]
+                self.assertNotIn("push", triggers)
+                self.assertNotIn("pull_request", triggers)
+                self.assertIn("workflow_dispatch", triggers)
+
+    def test_arm_build_pins_the_current_repository_revision(self):
+        workflow = load_yaml(ROOT / ".github" / "workflows" / "pr-test-arm64.yml")
+        build_step = next(
+            step
+            for step in workflow["jobs"]["build-test"]["steps"]
+            if step.get("name") == "Build container"
+        )
+        self.assertIn("github.repository", build_step["env"]["SGLANG_SOURCE_REPO"])
+        self.assertIn("github.sha", build_step["env"]["SGLANG_SOURCE_REF"])
+
+        dockerfile = (ROOT / "docker" / "arm64.Dockerfile").read_text(encoding="utf-8")
+        self.assertNotIn("sgl-project/sglang.git", dockerfile)
+        self.assertNotIn("ARG SGLANG_REPO=", dockerfile)
+        self.assertNotIn("ARG VER_SGLANG=", dockerfile)
+
+    def test_pr_opt_in_gates_skip_without_dispatching_hardware(self):
+        gate_path = ROOT / ".github" / "workflows" / "pr-gate.yml"
+        gate = load_yaml(gate_path)["jobs"]["pr-gate"]
+        for token in ("draft == false", "run-ci", "run-ci-extra", "event.action"):
+            self.assertIn(token, gate["if"])
+        self.assertNotIn("PR is draft. Blocking CI.", gate_path.read_text())
+
+        unsafe = (
+            "needs.call-gate.result == 'success' || "
+            "needs.call-gate.result == 'skipped'"
+        )
+        for workflow_name in ("pr-test.yml", "pr-test-extra.yml", "pr-test-amd.yml"):
+            with self.subTest(workflow=workflow_name):
+                source = (ROOT / ".github" / "workflows" / workflow_name).read_text()
+                self.assertNotIn(unsafe, source)
+
+    def test_opt_in_workflows_recheck_ready_and_labeled_prs(self):
+        for workflow_name in OPT_IN_PR_WORKFLOWS:
+            with self.subTest(workflow=workflow_name):
+                pull_request = load_yaml(
+                    ROOT / ".github" / "workflows" / workflow_name
+                )["on"]["pull_request"]
+                self.assertIn("ready_for_review", pull_request["types"])
+                self.assertIn("labeled", pull_request["types"])
+
     def test_full_ci_is_explicitly_opt_in_everywhere(self):
         for workflow_name, policy in WORKFLOWS.items():
             with self.subTest(workflow=workflow_name):

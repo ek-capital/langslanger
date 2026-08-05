@@ -49,6 +49,7 @@ from sglang.srt.environ import envs
 from sglang.srt.model_executor.runner_backend_utils.tc_piecewise_cuda_graph import (
     is_in_tc_piecewise_cuda_graph,
 )
+from sglang.srt.observability.profile_scope import profile_collective_scope
 from sglang.srt.platforms.device_mixin import _DEVICE_TO_DISTRIBUTED_BACKEND
 from sglang.srt.utils import (
     get_current_device_stream_fast,
@@ -635,6 +636,16 @@ class GroupCoordinator:
         if self.world_size == 1:
             return input_
 
+        with profile_collective_scope(
+            "all_reduce",
+            group_name=self.unique_name,
+            group_ranks=self.ranks,
+            rank_in_group=self.rank_in_group,
+            inputs=(input_,),
+        ):
+            return self._all_reduce_profiled(input_)
+
+    def _all_reduce_profiled(self, input_: torch.Tensor) -> torch.Tensor:
         if input_.is_cpu:
             if is_shm_available(input_.dtype, self.world_size, self.local_size):
                 torch.ops.sgl_kernel.shm_allreduce(input_, REDUCE_OP_SUM)
@@ -941,6 +952,19 @@ class GroupCoordinator:
         return output
 
     def reduce_scatter_tensor(self, output: torch.Tensor, input: torch.Tensor):
+        with profile_collective_scope(
+            "reduce_scatter",
+            group_name=self.unique_name,
+            group_ranks=self.ranks,
+            rank_in_group=self.rank_in_group,
+            inputs=(input,),
+            outputs=(output,),
+        ):
+            return self._reduce_scatter_tensor_profiled(output, input)
+
+    def _reduce_scatter_tensor_profiled(
+        self, output: torch.Tensor, input: torch.Tensor
+    ):
         if _is_npu:
             self._reduce_scatter_tensor(output, input)
         elif self._maybe_aiter_reduce_scatter(output, input):
@@ -1002,7 +1026,15 @@ class GroupCoordinator:
         if self.world_size == 1:
             output.copy_(input)
             return
-        reg_all_to_all_single(output, input, group_name=self.unique_name)
+        with profile_collective_scope(
+            "all_to_all",
+            group_name=self.unique_name,
+            group_ranks=self.ranks,
+            rank_in_group=self.rank_in_group,
+            inputs=(input,),
+            outputs=(output,),
+        ):
+            reg_all_to_all_single(output, input, group_name=self.unique_name)
 
     def reduce_scatter(
         self,
@@ -1010,7 +1042,17 @@ class GroupCoordinator:
         input_list: List[torch.Tensor],
     ) -> None:
         # TODO(ch-wan): support other backends
-        torch.distributed.reduce_scatter(output, input_list, group=self.device_group)
+        with profile_collective_scope(
+            "reduce_scatter",
+            group_name=self.unique_name,
+            group_ranks=self.ranks,
+            rank_in_group=self.rank_in_group,
+            inputs=(input_list,),
+            outputs=(output,),
+        ):
+            torch.distributed.reduce_scatter(
+                output, input_list, group=self.device_group
+            )
         return output
 
     def reduce_scatterv(
@@ -1113,6 +1155,19 @@ class GroupCoordinator:
         return envs.SGLANG_ENABLE_DETERMINISTIC_INFERENCE.get()
 
     def all_gather_into_tensor(self, output: torch.Tensor, input: torch.Tensor):
+        with profile_collective_scope(
+            "all_gather",
+            group_name=self.unique_name,
+            group_ranks=self.ranks,
+            rank_in_group=self.rank_in_group,
+            inputs=(input,),
+            outputs=(output,),
+        ):
+            return self._all_gather_into_tensor_profiled(output, input)
+
+    def _all_gather_into_tensor_profiled(
+        self, output: torch.Tensor, input: torch.Tensor
+    ):
         if _is_npu:
             self._all_gather_into_tensor(output, input)
         else:
@@ -1143,9 +1198,17 @@ class GroupCoordinator:
 
         if output_tensor_list is not None:
             # TODO(ch-wan): support other backends
-            return torch.distributed.all_gather(
-                output_tensor_list, input_, group=self.device_group
-            )
+            with profile_collective_scope(
+                "all_gather",
+                group_name=self.unique_name,
+                group_ranks=self.ranks,
+                rank_in_group=self.rank_in_group,
+                inputs=(input_,),
+                outputs=(output_tensor_list,),
+            ):
+                return torch.distributed.all_gather(
+                    output_tensor_list, input_, group=self.device_group
+                )
 
         assert (
             -input_.dim() <= dim < input_.dim()

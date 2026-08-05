@@ -20,6 +20,7 @@ from sglang.srt.managers.io_struct import ProfileReq, ProfileReqOutput, ProfileR
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.observability.profile_manifest import write_profile_manifest
 from sglang.srt.observability.profile_scope import (
+    record_profile_clock_sync,
     start_profile_recording,
     stop_profile_recording,
 )
@@ -332,6 +333,7 @@ class SchedulerProfilerManager:
         logger.info("Stop profiling" + stage_suffix + "...")
         artifact_paths = []
         if self.torch_profiler is not None:
+            record_profile_clock_sync()
             self.torch_profiler.stop()
             if not _is_npu:
                 # Build filename with only non-zero ranks to maintain backward compatibility

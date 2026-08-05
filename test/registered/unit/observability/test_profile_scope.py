@@ -7,6 +7,7 @@ from unittest.mock import patch
 from sglang.srt.distributed.parallel_state_wrapper import ParallelState
 from sglang.srt.observability.profile_scope import (
     batch_bucket,
+    profile_collective_scope,
     profile_scope,
     record_profile_impl,
     record_profile_step,
@@ -35,6 +36,20 @@ class TestProfileScope(unittest.TestCase):
 
     def test_disabled_step_recording_does_not_inspect_metadata(self):
         record_profile_step("disabled", tensor_like=object())
+
+    def test_disabled_collective_does_not_inspect_tensor(self):
+        class TensorLike:
+            def numel(self):
+                raise AssertionError("disabled profiling inspected a tensor")
+
+        with profile_collective_scope(
+            "all_reduce",
+            group_name="tp",
+            group_ranks=[0, 1],
+            rank_in_group=0,
+            inputs=(TensorLike(),),
+        ):
+            pass
 
     @patch("sglang.srt.observability.profile_scope.profile_range")
     def test_records_stable_scope_and_host_metadata(self, mock_profile_range):
@@ -71,6 +86,52 @@ class TestProfileScope(unittest.TestCase):
             )
             with self.assertRaises(TypeError):
                 record_profile_step("bad", tensor=object())
+
+    @patch("sglang.srt.observability.profile_scope.profile_range")
+    def test_records_collective_sequence_and_bytes(self, mock_profile_range):
+        class TensorLike:
+            def numel(self):
+                return 8
+
+            def element_size(self):
+                return 2
+
+        mock_profile_range.return_value.__enter__.return_value = None
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            start_profile_recording(
+                output_dir=temporary_dir,
+                profile_id="run",
+                profile_prefix="",
+                stage=None,
+                ps=ParallelState.trivial(),
+            )
+            with profile_scope(
+                "runtime.decode", scheduler_iteration=7, batch_bucket="2"
+            ):
+                for _ in range(2):
+                    with profile_collective_scope(
+                        "all_reduce",
+                        group_name="tp",
+                        group_ranks=[0, 1],
+                        rank_in_group=0,
+                        inputs=(TensorLike(),),
+                    ):
+                        pass
+            path = stop_profile_recording()
+
+            records = [json.loads(line) for line in Path(path).read_text().splitlines()]
+            starts = [
+                record
+                for record in records
+                if record["event"] == "scope_start"
+                and record["scope"] == "model.collective"
+            ]
+            self.assertEqual(
+                [record["collective_id"] for record in starts], ["tp:1", "tp:2"]
+            )
+            self.assertEqual(starts[0]["input_bytes"], 16)
+            self.assertEqual(starts[0]["group_ranks"], [0, 1])
+            self.assertEqual(starts[0]["scheduler_iteration"], 7)
 
     def test_records_explicit_implementation_and_source_once(self):
         with tempfile.TemporaryDirectory() as temporary_dir:

@@ -14,19 +14,40 @@ LangSlanger is Kinetic Capital's performance-first, SGLang-compatible research f
 | **Upstream base** | `sgl-project/sglang@v0.5.16` |
 | **Maintainer** | Kinetic Capital |
 
----
+## Drop-in naming
 
-<div align="center" id="sglangtop">
-<img src="https://raw.githubusercontent.com/sgl-project/sglang/main/assets/logo.png" alt="logo" width="400" margin="10px"></img>
+LangSlanger is the product name. SGLang remains the compatibility namespace so
+existing deployments continue to work unchanged:
 
-[![PyPI](https://img.shields.io/pypi/v/sglang)](https://pypi.org/project/sglang)
-![PyPI - Downloads](https://static.pepy.tech/badge/sglang?period=month)
-[![license](https://img.shields.io/github/license/sgl-project/sglang.svg)](https://github.com/sgl-project/sglang/tree/main/LICENSE)
-[![issue resolution](https://img.shields.io/github/issues-closed-raw/sgl-project/sglang)](https://github.com/sgl-project/sglang/issues)
-[![open issues](https://img.shields.io/github/issues-raw/sgl-project/sglang)](https://github.com/sgl-project/sglang/issues)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/sgl-project/sglang)
+```bash
+# Branded command
+langslanger serve meta-llama/Llama-3.1-8B-Instruct --tp 2
 
-</div>
+# Existing SGLang command: same parser, same runtime
+sglang serve meta-llama/Llama-3.1-8B-Instruct --tp 2
+```
+
+The optional top-level Python facade exposes the same public objects:
+
+```python
+import langslanger
+
+engine = langslanger.Engine(model_path="meta-llama/Llama-3.1-8B-Instruct")
+```
+
+Existing `import sglang` code remains canonical and fully supported. Internal
+SGLang module names, existing flags, configuration keys, environment variables,
+metrics, and APIs are intentionally retained for compatibility. New
+LangSlanger-only controls use the `langslanger` namespace.
+
+LangSlanger is an independent fork and is not affiliated with or endorsed by
+the SGLang project. See [ATTRIBUTION.md](ATTRIBUTION.md) for provenance and
+licensing details.
+
+## Upstream SGLang documentation
+
+The remainder of this README is retained from upstream so SGLang commands and
+operational guidance remain directly usable with LangSlanger.
 
 --------------------------------------------------------------------------------
 

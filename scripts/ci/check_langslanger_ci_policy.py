@@ -43,15 +43,30 @@ def main() -> None:
         require("workflow_dispatch" in triggers, f"{name} lost manual dispatch")
 
     arm_workflow = load_workflow("pr-test-arm64.yml")
+    source_step = next(
+        step
+        for step in arm_workflow["jobs"]["build-test"]["steps"]
+        if step.get("name") == "Resolve source revision"
+    )
     build_step = next(
         step
         for step in arm_workflow["jobs"]["build-test"]["steps"]
         if step.get("name") == "Build container"
     )
-    source_repo = build_step["env"]["SGLANG_SOURCE_REPO"]
-    source_ref = build_step["env"]["SGLANG_SOURCE_REF"]
-    require("github.repository" in source_repo, "Arm64 source is not the current repo")
-    require("github.sha" in source_ref, "Arm64 source is not pinned to a SHA")
+    require(
+        "github.repository" in source_step["env"]["CURRENT_REPO"],
+        "Arm64 source is not the current repo",
+    )
+    require("head.sha" in source_step["env"]["PR_SHA"], "Arm64 PR ref is not a SHA")
+    require("git rev-parse --verify HEAD" in source_step["run"], "Arm64 ref is mutable")
+    require(
+        "steps.source.outputs.repo" in build_step["env"]["SGLANG_SOURCE_REPO"],
+        "Arm64 build bypasses the resolved repo",
+    )
+    require(
+        "steps.source.outputs.ref" in build_step["env"]["SGLANG_SOURCE_REF"],
+        "Arm64 build bypasses the resolved SHA",
+    )
 
     dockerfile = (ROOT / "docker" / "arm64.Dockerfile").read_text(encoding="utf-8")
     require(

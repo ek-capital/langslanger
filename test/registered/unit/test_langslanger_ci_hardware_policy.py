@@ -85,13 +85,25 @@ class TestLangSlangerCIHardwarePolicy(unittest.TestCase):
 
     def test_arm_build_pins_the_current_repository_revision(self):
         workflow = load_yaml(ROOT / ".github" / "workflows" / "pr-test-arm64.yml")
+        source_step = next(
+            step
+            for step in workflow["jobs"]["build-test"]["steps"]
+            if step.get("name") == "Resolve source revision"
+        )
         build_step = next(
             step
             for step in workflow["jobs"]["build-test"]["steps"]
             if step.get("name") == "Build container"
         )
-        self.assertIn("github.repository", build_step["env"]["SGLANG_SOURCE_REPO"])
-        self.assertIn("github.sha", build_step["env"]["SGLANG_SOURCE_REF"])
+        self.assertIn("github.repository", source_step["env"]["CURRENT_REPO"])
+        self.assertIn("head.sha", source_step["env"]["PR_SHA"])
+        self.assertIn("git rev-parse --verify HEAD", source_step["run"])
+        self.assertIn(
+            "steps.source.outputs.repo", build_step["env"]["SGLANG_SOURCE_REPO"]
+        )
+        self.assertIn(
+            "steps.source.outputs.ref", build_step["env"]["SGLANG_SOURCE_REF"]
+        )
 
         dockerfile = (ROOT / "docker" / "arm64.Dockerfile").read_text(encoding="utf-8")
         self.assertNotIn("sgl-project/sglang.git", dockerfile)

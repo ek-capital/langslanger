@@ -76,10 +76,27 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
 
+      - name: Resolve source revision
+        id: source
+        env:
+          CURRENT_REPO: ${{ format('{0}/{1}.git', github.server_url, github.repository) }}
+          PR_REPO: ${{ github.event.pull_request.head.repo.clone_url }}
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [[ -n "$PR_REPO" && -n "$PR_SHA" ]]; then
+            source_repo="$PR_REPO"
+            source_ref="$PR_SHA"
+          else
+            source_repo="$CURRENT_REPO"
+            source_ref="$(git rev-parse --verify HEAD)"
+          fi
+          echo "repo=$source_repo" >> "$GITHUB_OUTPUT"
+          echo "ref=$source_ref" >> "$GITHUB_OUTPUT"
+
       - name: Build container
         env:
-          SGLANG_SOURCE_REPO: ${{ github.event.pull_request.head.repo.clone_url || format('{0}/{1}.git', github.server_url, github.repository) }}
-          SGLANG_SOURCE_REF: ${{ github.event.pull_request.head.sha || inputs.ref || github.sha }}
+          SGLANG_SOURCE_REPO: ${{ steps.source.outputs.repo }}
+          SGLANG_SOURCE_REF: ${{ steps.source.outputs.ref }}
         run: |
           docker build \
             --build-arg SGLANG_REPO="$SGLANG_SOURCE_REPO" \

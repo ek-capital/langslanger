@@ -1,0 +1,21 @@
+name: LangSlanger CI Policy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  langslanger-ci-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Validate CI policy
+        run: uv run --with pyyaml --no-project python scripts/ci/check_langslanger_ci_policy.py

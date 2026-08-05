@@ -6,14 +6,6 @@ run-name: ${{ (inputs.target_stage || inputs.target_stage_select) && (inputs.pr_
 on:
   schedule:
     - cron: '0 */12 * * *' # Run every 12 hours (UTC)
-  pull_request:
-    paths:
-      - "python/**"
-      - "scripts/ci/**"
-      - "test/**"
-      - "sgl-kernel/**"
-      - ".github/workflows/pr-test-amd.yml"
-      - "docker/rocm.Dockerfile"
   workflow_dispatch:
     inputs:
       target_stage_select:
@@ -120,7 +112,15 @@ concurrency:
 
 jobs:
   call-gate:
-    if: github.event_name != 'schedule'
+    if: |
+      github.event_name != 'schedule' &&
+      (
+        github.event_name != 'pull_request' ||
+        (
+          github.event.pull_request.draft == false &&
+          contains(github.event.pull_request.labels.*.name, 'run-ci')
+        )
+      )
     uses: ./.github/workflows/pr-gate.yml
     secrets: inherit
   check-changes:
@@ -228,7 +228,7 @@ jobs:
         (contains(format(',{0},', inputs.target_stage || inputs.target_stage_select), ',sgl-kernel-unit-test-amd,')) ||
         (
           !(inputs.target_stage || inputs.target_stage_select) &&
-          (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') &&
+          (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) &&
           needs.check-changes.outputs.sgl_kernel == 'true'
         )
       )
@@ -286,7 +286,7 @@ jobs:
         (contains(format(',{0},', inputs.target_stage || inputs.target_stage_select), ',sgl-kernel-unit-test-2-gpu-amd,')) ||
         (
           !(inputs.target_stage || inputs.target_stage_select) &&
-          (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') &&
+          (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) &&
           needs.check-changes.outputs.sgl_kernel == 'true'
         )
       )
@@ -327,7 +327,7 @@ jobs:
         (contains(format(',{0},', inputs.target_stage || inputs.target_stage_select), ',stage-a-test-1-gpu-small-amd,')) ||
         (
           !(inputs.target_stage || inputs.target_stage_select) &&
-          (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') &&
+          (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) &&
           ((needs.check-changes.outputs.main_package == 'true') || (needs.check-changes.outputs.sgl_kernel == 'true'))
         )
       )
@@ -364,7 +364,7 @@ jobs:
         (contains(format(',{0},', inputs.target_stage || inputs.target_stage_select), ',jit-kernel-unit-test-amd,')) ||
         (
           !(inputs.target_stage || inputs.target_stage_select) &&
-          (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') &&
+          (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) &&
           needs.check-changes.outputs.jit_kernel == 'true'
         )
       )
@@ -401,7 +401,7 @@ jobs:
         (contains(format(',{0},', inputs.target_stage || inputs.target_stage_select), ',jit-kernel-benchmark-test-amd,')) ||
         (
           !(inputs.target_stage || inputs.target_stage_select) &&
-          (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') &&
+          (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) &&
           needs.check-changes.outputs.jit_kernel == 'true'
         )
       )
@@ -442,7 +442,7 @@ jobs:
       github.event_name == 'pull_request' &&
       !(inputs.target_stage || inputs.target_stage_select) &&
       (needs.check-changes.outputs.main_package == 'true' || needs.check-changes.outputs.sgl_kernel == 'true') &&
-      (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped')
+      (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped'))
     runs-on: ubuntu-latest
     outputs:
       stage_a_result: ${{ steps.wait.outputs.result }}
@@ -659,7 +659,7 @@ jobs:
         (contains(format(',{0},', inputs.target_stage || inputs.target_stage_select), ',multimodal-gen-test-1-gpu-amd,')) ||
         (
           !(inputs.target_stage || inputs.target_stage_select) &&
-          (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') &&
+          (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) &&
           needs.check-changes.outputs.multimodal_gen == 'true'
         )
       )
@@ -799,7 +799,7 @@ jobs:
         (contains(format(',{0},', inputs.target_stage || inputs.target_stage_select), ',multimodal-gen-test-2-gpu-amd,')) ||
         (
           !(inputs.target_stage || inputs.target_stage_select) &&
-          (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') &&
+          (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) &&
           needs.check-changes.outputs.multimodal_gen == 'true'
         )
       )
@@ -942,7 +942,7 @@ jobs:
         (contains(format(',{0},', inputs.target_stage || inputs.target_stage_select), ',multimodal-gen-unit-test-amd,')) ||
         (
           !(inputs.target_stage || inputs.target_stage_select) &&
-          (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') &&
+          (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) &&
           needs.check-changes.outputs.multimodal_gen == 'true'
         )
       )
@@ -997,7 +997,7 @@ jobs:
       !(inputs.target_stage || inputs.target_stage_select) &&
       (needs.check-changes.outputs.main_package == 'true' || needs.check-changes.outputs.sgl_kernel == 'true') &&
       (needs.wait-for-stage-a-amd.result == 'success' || needs.wait-for-stage-a-amd.result == 'skipped') &&
-      (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped')
+      (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped'))
     runs-on: ubuntu-latest
     outputs:
       stage_b_result: ${{ steps.wait.outputs.result }}

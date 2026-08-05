@@ -1,8 +1,8 @@
 FROM ubuntu:24.04
 SHELL ["/bin/bash", "-c"]
 
-ARG SGLANG_REPO=https://github.com/sgl-project/sglang.git
-ARG VER_SGLANG=main
+ARG SGLANG_REPO
+ARG VER_SGLANG
 
 RUN apt-get update && \
     apt-get full-upgrade -y && \
@@ -36,6 +36,8 @@ ENV CMAKE_BUILD_PARALLEL_LEVEL=1
 WORKDIR /sgl-workspace
 RUN source $HOME/.local/bin/env && \
     source /opt/.venv/bin/activate && \
+    test -n "${SGLANG_REPO}" && \
+    test -n "${VER_SGLANG}" && \
     git clone ${SGLANG_REPO} sglang && \
     cd sglang && \
     git checkout ${VER_SGLANG} && \

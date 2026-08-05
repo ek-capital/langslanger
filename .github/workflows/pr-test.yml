@@ -10,7 +10,6 @@ run-name: >-
 on:
   schedule:
     - cron: '0 11,23 * * *'  # Run 2x daily, 12h apart, off PR-push peaks
-  pull_request:
   workflow_dispatch:
     inputs:
       force_continue_on_error:
@@ -138,7 +137,7 @@ jobs:
       github.event_name == 'pull_request' &&
       inputs.test_parallel_dispatch != true &&
       (needs.check-changes.outputs.main_package == 'true' || needs.check-changes.outputs.sgl_kernel == 'true') &&
-      (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped')
+      needs.call-gate.result == 'success'
     runs-on: ubuntu-latest
     outputs:
       base_a_result: ${{ steps.wait.outputs.result }}
@@ -168,7 +167,7 @@ jobs:
       inputs.test_parallel_dispatch != true &&
       (needs.check-changes.outputs.main_package == 'true' || needs.check-changes.outputs.sgl_kernel == 'true') &&
       (needs.wait-for-base-a.result == 'success' || needs.wait-for-base-a.result == 'skipped') &&
-      (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped')
+      needs.call-gate.result == 'success'
     runs-on: ubuntu-latest
     outputs:
       base_b_result: ${{ steps.wait.outputs.result }}
@@ -197,6 +196,13 @@ jobs:
     if: |
       github.event_name != 'schedule' &&
       inputs.test_parallel_dispatch != true &&
+      (
+        github.event_name != 'pull_request' ||
+        (
+          github.event.pull_request.draft == false &&
+          contains(github.event.pull_request.labels.*.name, 'run-ci')
+        )
+      ) &&
       (
         needs.check-changes.outputs.main_package == 'true' ||
         needs.check-changes.outputs.sgl_kernel == 'true' ||

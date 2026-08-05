@@ -19,6 +19,10 @@ from sglang.srt.environ import envs
 from sglang.srt.managers.io_struct import ProfileReq, ProfileReqOutput, ProfileReqType
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.observability.profile_manifest import write_profile_manifest
+from sglang.srt.observability.profile_scope import (
+    start_profile_recording,
+    stop_profile_recording,
+)
 from sglang.srt.platforms import current_platform
 from sglang.srt.runtime_context import get_server_args
 from sglang.srt.utils import is_mps, is_npu
@@ -262,6 +266,15 @@ class SchedulerProfilerManager:
                 torch.cuda.cudart().cudaProfilerStart()
             self.profile_in_progress = True
 
+        if self.profile_in_progress:
+            start_profile_recording(
+                output_dir=self.torch_profiler_output_dir,
+                profile_id=self.profile_id,
+                profile_prefix=self.profile_prefix,
+                stage=stage.name.lower() if stage else None,
+                ps=self.ps,
+            )
+
         return ProfileReqOutput(success=True, message="Succeeded")
 
     def _merge_profile_traces(self) -> str:
@@ -373,6 +386,10 @@ class SchedulerProfilerManager:
         if "CUDA_PROFILER" in self.profiler_activities:
             if self.ps.gpu_id == get_server_args().base_gpu_id:
                 torch.cuda.cudart().cudaProfilerStop()
+
+        sidecar_path = stop_profile_recording()
+        if sidecar_path is not None:
+            artifact_paths.append(sidecar_path)
 
         merge_message = self._merge_profile_traces()
 

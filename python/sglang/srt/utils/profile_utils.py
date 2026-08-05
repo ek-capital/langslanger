@@ -11,8 +11,12 @@ import torch
 from sglang.srt.distributed.parallel_state_wrapper import ParallelState
 from sglang.srt.environ import envs
 from sglang.srt.managers.io_struct import ProfileReqOutput
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.observability.profile_manifest import write_profile_manifest
+from sglang.srt.observability.profile_scope import (
+    start_profile_recording,
+    stop_profile_recording,
+)
 from sglang.srt.platforms import current_platform
 from sglang.srt.runtime_context import get_server_args
 from sglang.srt.utils import is_npu
@@ -141,10 +145,20 @@ class ProfileManager:
         )
         self.profiler_started_at_ns = time.time_ns()
         self.profiler.start()
+        start_profile_recording(
+            output_dir=self.profiler_kwargs["output_dir"],
+            profile_id=self.profiler_kwargs["profile_id"],
+            profile_prefix=self.profiler_kwargs["output_prefix"],
+            stage=stage,
+            ps=self.ps,
+        )
 
     def _do_stop(self):
         logger.info("Stop profiling...")
         artifact_paths = self.profiler.stop()
+        sidecar_path = stop_profile_recording()
+        if sidecar_path is not None:
+            artifact_paths.append(sidecar_path)
         stopped_at_ns = time.time_ns()
         write_profile_manifest(
             output_dir=self.profiler_kwargs["output_dir"],
@@ -465,13 +479,3 @@ class _ProfilerRPD(_ProfilerConcreteBase):
             rpd_to_chrome_trace("trace.rpd", self.rpd_profile_path)
             return [self.rpd_profile_path]
         return []
-
-
-def build_step_span_name(forward_batch: ForwardBatch) -> str:
-    """Build a profile-trace span name for one forward step."""
-    mode = forward_batch.forward_mode
-    bs = forward_batch.batch_size
-    if mode == ForwardMode.EXTEND:
-        ext_toks = forward_batch.extend_num_tokens or 0
-        return f"step[EXTEND bs={bs} toks={ext_toks}]"
-    return f"step[{mode.name} bs={bs}]"

@@ -6,7 +6,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import langslanger
-
 import sglang
 from sglang.cli.main import main as sglang_main
 from sglang.test.ci.ci_register import register_cpu_ci

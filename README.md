@@ -1,3 +1,21 @@
+# LangSlanger
+
+> [!CAUTION]
+> **Experimental research software. Do not use LangSlanger in production.**
+> It deliberately integrates aggressive, insufficiently proven inference optimizations and may trade stability, compatibility, or correctness for performance experiments.
+
+LangSlanger is Kinetic Capital's performance-first, SGLang-compatible research fork. It starts from the latest production SGLang release, [`v0.5.16`](https://github.com/sgl-project/sglang/releases/tag/v0.5.16), while its own changes are expected to remain experimental until they are independently validated and upstreamed.
+
+| | |
+| --- | --- |
+| **Status** | Nightly / research |
+| **Production use** | No |
+| **Compatibility target** | SGLang |
+| **Upstream base** | `sgl-project/sglang@v0.5.16` |
+| **Maintainer** | Kinetic Capital |
+
+---
+
 <div align="center" id="sglangtop">
 <img src="https://raw.githubusercontent.com/sgl-project/sglang/main/assets/logo.png" alt="logo" width="400" margin="10px"></img>
 

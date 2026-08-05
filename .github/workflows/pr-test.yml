@@ -28,6 +28,11 @@ on:
         required: false
         type: boolean
         default: false
+      enable_upstream_full_ci:
+        description: "Enable upstream hardware outside the LangSlanger RunPod fleet (B200, 8-GPU, and ARM)"
+        required: false
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       git_ref:
@@ -42,6 +47,11 @@ on:
         default: false
       skip_pr_test_health_check:
         description: "Skip PR test health check fast-fail (e.g. for release branch cuts)"
+        required: false
+        type: boolean
+        default: false
+      enable_upstream_full_ci:
+        description: "Enable upstream hardware outside the LangSlanger RunPod fleet (B200, 8-GPU, and ARM)"
         required: false
         type: boolean
         default: false
@@ -70,6 +80,30 @@ permissions:
   pull-requests: read
 
 jobs:
+  langslanger-hardware-coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report active hardware coverage
+        env:
+          FULL_CI: ${{ inputs.enable_upstream_full_ci == true && 'true' || 'false' }}
+        run: |
+          {
+            echo "## LangSlanger hardware coverage"
+            echo
+            echo "Exact runner labels enabled by default:"
+            echo "- \`1-gpu-5090\`"
+            echo "- \`1-gpu-h100\`"
+            echo "- \`2-gpu-h100\`"
+            echo "- \`4-gpu-h100\`"
+            echo
+            if [[ "$FULL_CI" == "true" ]]; then
+              echo "Extended upstream hardware: enabled for this run."
+            else
+              echo "Skipped by default: B200, 8-GPU H200/H20, and ARM wheel builds."
+              echo "Use the manual \`enable_upstream_full_ci\` input only after matching runners exist."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # =============================================== check changes ====================================================
   check-changes:
     uses: ./.github/workflows/_pr-test-check-changes.yml
@@ -85,6 +119,7 @@ jobs:
     with:
       git_ref: ${{ inputs.git_ref || '' }}
       run_all_tests: true
+      enable_upstream_full_ci: ${{ inputs.enable_upstream_full_ci == true }}
     secrets: inherit
 
   # =============================================== Wait Jobs for Sequential PR Execution ====================================================
@@ -184,8 +219,9 @@ jobs:
       needs.call-gate.result == 'success'
     uses: ./.github/workflows/_pr-test-sgl-kernel-build.yml
     with:
-      runs_on: x64-kernel-build-node
+      runs_on: 1-gpu-h100
       job_display_name: Build Wheel
+      build_mode: native
       git_ref: ${{ inputs.git_ref || '' }}
       skip_pr_test_health_check: ${{ inputs.skip_pr_test_health_check == true }}
     secrets: inherit
@@ -196,6 +232,7 @@ jobs:
     if: |
       github.event_name != 'schedule' &&
       inputs.test_parallel_dispatch != true &&
+      inputs.enable_upstream_full_ci == true &&
       needs.check-changes.result == 'success' &&
       needs.check-changes.outputs.sgl_kernel == 'true' &&
       needs.call-gate.result == 'success'
@@ -221,6 +258,7 @@ jobs:
       sgl_kernel: ${{ needs.check-changes.outputs.sgl_kernel }}
       git_ref: ${{ inputs.git_ref || '' }}
       skip_pr_test_health_check: ${{ inputs.skip_pr_test_health_check == true }}
+      enable_upstream_full_ci: ${{ inputs.enable_upstream_full_ci == true }}
     secrets: inherit
 
   # =============================================== jit-kernel ====================================================
@@ -246,6 +284,7 @@ jobs:
       git_ref: ${{ inputs.git_ref || '' }}
       test_parallel_dispatch: ${{ inputs.test_parallel_dispatch == true && 'true' || 'false' }}
       skip_pr_test_health_check: ${{ inputs.skip_pr_test_health_check == true }}
+      enable_upstream_full_ci: ${{ inputs.enable_upstream_full_ci == true }}
     secrets: inherit
 
   # =============================================== primary ====================================================
@@ -386,7 +425,7 @@ jobs:
 
   base-b-test-4-gpu-b200:
     needs: [check-changes, call-gate, wait-for-base-a, sgl-kernel-build-wheels]
-    if: ${{ !failure() && !cancelled() }}
+    if: ${{ !failure() && !cancelled() && inputs.enable_upstream_full_ci == true }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: base-b-test-4-gpu-b200
@@ -415,6 +454,7 @@ jobs:
       test_parallel_dispatch: ${{ inputs.test_parallel_dispatch == true && 'true' || 'false' }}
       caller_needs_failure: ${{ (needs.call-gate.result == 'failure' || needs.sgl-kernel-build-wheels.result == 'failure' || needs.check-changes.result == 'failure') && 'true' || 'false' }}
       skip_pr_test_health_check: ${{ inputs.skip_pr_test_health_check == true && 'true' || 'false' }}
+      enable_upstream_full_ci: ${{ inputs.enable_upstream_full_ci == true }}
     secrets: inherit
 
   base-c-test-4-gpu-h100:
@@ -432,7 +472,7 @@ jobs:
 
   base-c-test-8-gpu-h200:
     needs: [check-changes, call-gate, wait-for-base-b, sgl-kernel-build-wheels]
-    if: ${{ !failure() && !cancelled() }}
+    if: ${{ !failure() && !cancelled() && inputs.enable_upstream_full_ci == true }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: base-c-test-8-gpu-h200
@@ -452,7 +492,7 @@ jobs:
 
   base-c-test-8-gpu-h20:
     needs: [check-changes, call-gate, wait-for-base-b, sgl-kernel-build-wheels]
-    if: ${{ !failure() && !cancelled() }}
+    if: ${{ !failure() && !cancelled() && inputs.enable_upstream_full_ci == true }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: base-c-test-8-gpu-h20
@@ -480,7 +520,7 @@ jobs:
 
   base-c-test-deepep-4-gpu-b200:
     needs: [check-changes, call-gate, wait-for-base-b, sgl-kernel-build-wheels]
-    if: ${{ !failure() && !cancelled() }}
+    if: ${{ !failure() && !cancelled() && inputs.enable_upstream_full_ci == true }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: base-c-test-deepep-4-gpu-b200
@@ -494,7 +534,7 @@ jobs:
 
   base-c-test-deepep-8-gpu-h200:
     needs: [check-changes, call-gate, wait-for-base-b, sgl-kernel-build-wheels]
-    if: ${{ !failure() && !cancelled() }}
+    if: ${{ !failure() && !cancelled() && inputs.enable_upstream_full_ci == true }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: base-c-test-deepep-8-gpu-h200
@@ -508,7 +548,7 @@ jobs:
 
   base-c-test-4-gpu-b200:
     needs: [check-changes, call-gate, wait-for-base-b, sgl-kernel-build-wheels]
-    if: ${{ !failure() && !cancelled() }}
+    if: ${{ !failure() && !cancelled() && inputs.enable_upstream_full_ci == true }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: base-c-test-4-gpu-b200
@@ -540,6 +580,7 @@ jobs:
       [
         call-gate,
         check-changes,
+        langslanger-hardware-coverage,
 
         sgl-kernel-build-wheels,
         sgl-kernel-build-wheels-arm,

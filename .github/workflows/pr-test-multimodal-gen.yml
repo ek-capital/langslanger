@@ -35,6 +35,10 @@ on:
         required: false
         type: string
         default: 'false'
+      enable_upstream_full_ci:
+        required: false
+        type: boolean
+        default: false
 
 # Workflow-level env is NOT inherited from the caller in reusable workflows.
 # The github context (including github.event_name) IS inherited from the caller.
@@ -383,6 +387,7 @@ jobs:
 
   multimodal-gen-test-1-b200:
     if: |
+      inputs.enable_upstream_full_ci == true &&
       ((github.event_name == 'schedule' || inputs.test_parallel_dispatch == 'true') || (inputs.caller_needs_failure != 'true' && !cancelled())) &&
       inputs.multimodal_gen == 'true'
     runs-on: ${{ fromJson(inputs.runs_on_map)[inputs.runner_config] }}

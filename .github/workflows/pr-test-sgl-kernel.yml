@@ -20,6 +20,10 @@ on:
         required: false
         type: boolean
         default: false
+      enable_upstream_full_ci:
+        required: false
+        type: boolean
+        default: false
 
 # Workflow-level env is NOT inherited from the caller in reusable workflows.
 # The github context (including github.event_name) IS inherited from the caller.
@@ -113,6 +117,7 @@ jobs:
           echo "All benchmark tests completed!"
 
   sgl-kernel-b200-test:
+    if: inputs.enable_upstream_full_ci == true
     runs-on: ${{ fromJson(inputs.runs_on_map)[inputs.runner_config] }}
     timeout-minutes: 240
     steps:

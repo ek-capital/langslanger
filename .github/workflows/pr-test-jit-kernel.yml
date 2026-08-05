@@ -27,6 +27,10 @@ on:
         required: false
         type: boolean
         default: false
+      enable_upstream_full_ci:
+        required: false
+        type: boolean
+        default: false
 
 # Workflow-level env is NOT inherited from the caller in reusable workflows (verified by CI test).
 # The github context (including github.event_name) IS inherited from the caller.
@@ -82,6 +86,7 @@ jobs:
     # Runs whenever call-jit-kernel-tests dispatches this workflow. That caller is the
     # single gate (PR jit_kernel changes, or scheduled/parallel-dispatch full runs), so
     # the sub-jobs no longer re-exclude schedule/parallel-dispatch here.
+    if: inputs.enable_upstream_full_ci == true
     runs-on: 8-gpu-h200
     timeout-minutes: 240
     steps:
@@ -160,6 +165,7 @@ jobs:
     # Runs whenever call-jit-kernel-tests dispatches this workflow. That caller is the
     # single gate (PR jit_kernel changes, or scheduled/parallel-dispatch full runs), so
     # the sub-jobs no longer re-exclude schedule/parallel-dispatch here.
+    if: inputs.enable_upstream_full_ci == true
     runs-on: ${{ fromJson(inputs.runs_on_map)[inputs.runner_config] }}
     timeout-minutes: 240
     steps:

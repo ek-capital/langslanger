@@ -47,6 +47,12 @@ from sglang.benchmark.datasets.speed_bench import (
     SPEED_BENCH_REVISION,
     SPEED_BENCH_SUITES,
 )
+from sglang.benchmark.profile_run_bundle import (
+    resolve_profile_id,
+    summarize_speculative_outputs,
+    workload_sha256,
+    write_profile_run_bundle,
+)
 from sglang.benchmark.utils import (
     get_tokenizer,
     parse_custom_headers,
@@ -124,10 +130,18 @@ class RequestFuncOutput:
     start_time: float = 0.0
     cached_tokens: int = 0
     cached_tokens_details: Optional[Dict[str, Any]] = None
+    spec_metrics_present: bool = False
+    spec_accept_rate: Optional[float] = None
     spec_accept_length: float = 0.0
     spec_cap_length: float = 0.0
     spec_block_accept_length: float = 0.0
+    spec_num_correct_drafts: Optional[int] = None
+    spec_num_proposed_drafts: Optional[int] = None
+    spec_verify_ct: Optional[int] = None
+    spec_correct_drafts_histogram: List[int] = field(default_factory=list)
     spec_cap_lens_histogram: List[int] = field(default_factory=list)
+    profile_id: Optional[str] = None
+    profile_output_dir: Optional[str] = None
 
     @staticmethod
     def init_new(request_func_input: RequestFuncInput):
@@ -269,6 +283,26 @@ def _extract_cache_from_sglext(data, output):
         output.cached_tokens_details = details
 
 
+def _extract_speculative_metrics(meta_info: Dict[str, Any], output) -> None:
+    """Copy exact per-request speculative counters from an SGLang response."""
+    if not meta_info or not any(key.startswith("spec_") for key in meta_info):
+        return
+    output.spec_metrics_present = True
+    output.spec_accept_rate = meta_info.get("spec_accept_rate")
+    output.spec_accept_length = meta_info.get("spec_accept_length", 0.0) or 0.0
+    output.spec_cap_length = meta_info.get("spec_cap_length", 0.0) or 0.0
+    output.spec_block_accept_length = (
+        meta_info.get("spec_block_accept_length", 0.0) or 0.0
+    )
+    output.spec_num_correct_drafts = meta_info.get("spec_num_correct_drafts")
+    output.spec_num_proposed_drafts = meta_info.get("spec_num_proposed_drafts")
+    output.spec_verify_ct = meta_info.get("spec_verify_ct")
+    output.spec_correct_drafts_histogram = (
+        meta_info.get("spec_correct_drafts_histogram", []) or []
+    )
+    output.spec_cap_lens_histogram = meta_info.get("spec_cap_lens_histogram", []) or []
+
+
 # set ignore_eos True by default
 async def async_request_openai_completions(
     request_func_input: RequestFuncInput,
@@ -341,6 +375,14 @@ async def async_request_openai_completions(
                             pass
                         else:
                             data = json.loads(chunk)
+                            choices = data.get("choices") or []
+                            _extract_speculative_metrics(
+                                data.get("meta_info")
+                                or data.get("sglext")
+                                or (choices[0].get("meta_info") if choices else None)
+                                or {},
+                                output,
+                            )
 
                             if getattr(args, "cache_report", False):
                                 _extract_cache_from_sglext(data, output)
@@ -498,18 +540,11 @@ async def async_request_openai_chat_completions(
                         output.output_len = response_json.get("usage", {}).get(
                             "completion_tokens", output_len
                         )
-                        _meta_info = response_json["choices"][0].get("meta_info") or {}
-                        output.spec_accept_length = (
-                            _meta_info.get("spec_accept_length", 0.0) or 0.0
-                        )
-                        output.spec_cap_length = (
-                            _meta_info.get("spec_cap_length", 0.0) or 0.0
-                        )
-                        output.spec_block_accept_length = (
-                            _meta_info.get("spec_block_accept_length", 0.0) or 0.0
-                        )
-                        output.spec_cap_lens_histogram = (
-                            _meta_info.get("spec_cap_lens_histogram", []) or []
+                        _extract_speculative_metrics(
+                            response_json["choices"][0].get("meta_info")
+                            or response_json.get("sglext")
+                            or {},
+                            output,
                         )
                         if getattr(args, "cache_report", False):
                             _extract_cache_from_sglext(response_json, output)
@@ -536,6 +571,15 @@ async def async_request_openai_chat_completions(
                                     _extract_cache_from_sglext(data, output)
 
                                 choices = data.get("choices") or []
+                                _extract_speculative_metrics(
+                                    data.get("meta_info")
+                                    or data.get("sglext")
+                                    or (
+                                        choices[0].get("meta_info") if choices else None
+                                    )
+                                    or {},
+                                    output,
+                                )
                                 if not choices:
                                     continue
 
@@ -734,10 +778,7 @@ async def async_request_sglang_generate(
                             data = json.loads(chunk)
 
                             _meta_info = data.get("meta_info") or {}
-                            if _meta_info.get("spec_accept_length") is not None:
-                                output.spec_accept_length = _meta_info[
-                                    "spec_accept_length"
-                                ]
+                            _extract_speculative_metrics(_meta_info, output)
 
                             # NOTE: Some completion API might have a last
                             # usage summary response without a token so we
@@ -853,6 +894,8 @@ async def async_request_profile(api_url: str) -> RequestFuncOutput:
         output = RequestFuncOutput()
         try:
             if api_url.endswith("/start_profile"):
+                profile_id = resolve_profile_id(getattr(args, "profile_id", None))
+                args.profile_id = profile_id
                 num_steps = getattr(args, "profile_num_steps", None)
                 profile_by_stage = getattr(args, "profile_by_stage", None)
                 if profile_by_stage and num_steps is None:
@@ -861,11 +904,13 @@ async def async_request_profile(api_url: str) -> RequestFuncOutput:
                 output_dir = getattr(args, "profile_output_dir", None)
                 if output_dir is None:
                     output_dir = os.getenv("SGLANG_TORCH_PROFILER_DIR", "/tmp")
-                output_dir = Path(os.path.abspath(os.path.normpath(output_dir))) / str(
-                    time.time()
+                output_dir = (
+                    Path(os.path.abspath(os.path.normpath(output_dir))) / profile_id
                 )
                 output_dir.mkdir(exist_ok=True, parents=True)
                 output_dir = str(output_dir)
+                output.profile_id = profile_id
+                output.profile_output_dir = output_dir
 
                 body = {
                     "activities": getattr(args, "profile_activities", []),
@@ -873,6 +918,7 @@ async def async_request_profile(api_url: str) -> RequestFuncOutput:
                     "profile_by_stage": profile_by_stage,
                     "profile_stages": getattr(args, "profile_stages", None),
                     "output_dir": output_dir,
+                    "profile_id": profile_id,
                     "profile_prefix": getattr(args, "profile_prefix", None),
                 }
             else:
@@ -922,7 +968,9 @@ def _build_profile_urls(
     return profile_urls
 
 
-async def _call_profile_pd(profile_urls: List[Tuple[str, str]], mode: str) -> None:
+async def _call_profile_pd(
+    profile_urls: List[Tuple[str, str]], mode: str
+) -> List[Dict[str, Any]]:
     """Call profile endpoint (start/stop) on PD separated workers.
 
     Args:
@@ -935,14 +983,30 @@ async def _call_profile_pd(profile_urls: List[Tuple[str, str]], mode: str) -> No
 
     print(f"{action} profiler...")
 
+    targets = []
     for worker_type, url in profile_urls:
         profile_output = await async_request_profile(api_url=url + endpoint)
+        targets.append(_profile_target(worker_type, url, profile_output))
         if profile_output.success:
             print(f"Profiler {action_past} for {worker_type} worker at {url}")
         else:
             print(
                 f"Failed to {mode} profiler for {worker_type} worker at {url}: {profile_output.error}"
             )
+    return targets
+
+
+def _profile_target(
+    worker_type: str, url: str, output: RequestFuncOutput
+) -> Dict[str, Any]:
+    return {
+        "worker": worker_type,
+        "url": url,
+        "profile_id": output.profile_id,
+        "output_dir": output.profile_output_dir,
+        "start_succeeded": output.success,
+        "error": output.error or None,
+    }
 
 
 ASYNC_REQUEST_FUNCS = {
@@ -1375,6 +1439,8 @@ async def benchmark(
         request_func = ASYNC_REQUEST_FUNCS[backend]
     else:
         raise ValueError(f"Unknown backend: {backend}")
+    if profile:
+        args.profile_id = resolve_profile_id(getattr(args, "profile_id", None))
 
     # Multi-turn iff prompt[0] is a valid per-round payload. Single-shot
     # OpenAI messages (List[Dict]) is excluded since its first element is a dict.
@@ -1487,14 +1553,18 @@ async def benchmark(
             print("Skipping profiler start. Please specify worker URLs for profiling.")
 
     # Start profiler
+    profile_targets: List[Dict[str, Any]] = []
     if profile:
         if pd_separated:
             if pd_profile_urls:
-                await _call_profile_pd(pd_profile_urls, "start")
+                profile_targets = await _call_profile_pd(pd_profile_urls, "start")
         else:
             print("Starting profiler...")
             profile_output = await async_request_profile(
                 api_url=base_url + "/start_profile"
+            )
+            profile_targets.append(
+                _profile_target("combined", base_url, profile_output)
             )
             if profile_output.success:
                 print("Profiler started")
@@ -1789,6 +1859,8 @@ async def benchmark(
 
     resp = requests.get(base_url + "/server_info", headers=get_auth_headers())
     server_info = resp.json() if resp.status_code == 200 else None
+    speculative_summary = summarize_speculative_outputs(outputs)
+    ordered_requests_sha256 = workload_sha256(input_requests)
 
     if (
         metrics.median_ttft_ms is not None
@@ -1849,6 +1921,8 @@ async def benchmark(
             "p99_itl_ms": metrics.p99_itl_ms,
             "concurrency": metrics.concurrency,
             "accept_length": accept_length,
+            "ordered_requests_sha256": ordered_requests_sha256,
+            "speculative_decoding": speculative_summary,
             "max_output_tokens_per_s": metrics.max_output_tokens_per_s,
             "max_concurrent_requests": metrics.max_concurrent_requests,
         }
@@ -1892,6 +1966,45 @@ async def benchmark(
                 f"{args.backend}_{now}_{args.num_prompts}_{args.dataset_name}.jsonl"
             )
 
+    bundle_output_path = None
+    workload_evidence = None
+    if profile:
+        configured_bundle_path = getattr(args, "profile_bundle_output", None)
+        if configured_bundle_path:
+            bundle_output_path = Path(configured_bundle_path).expanduser().resolve()
+        else:
+            benchmark_path = Path(output_file_name).expanduser().resolve()
+            bundle_output_path = benchmark_path.with_name(
+                f"{benchmark_path.stem}.{args.profile_id}.profile.json"
+            )
+        workload_evidence = {
+            "ordered_requests_sha256": ordered_requests_sha256,
+            "source_record_count": len(input_requests),
+            "issued_request_count": len(outputs),
+            "model": model_id,
+            "backend": backend,
+            "dataset_name": args.dataset_name,
+            "dataset_path": args.dataset_path or None,
+            "dataset_sha256": getattr(args, "dataset_sha256", None),
+            "seed": args.seed,
+            "request_rate": "trace" if use_trace_timestamps else request_rate,
+            "max_concurrency": max_concurrency,
+        }
+        if args.dataset_name.startswith("speed-bench"):
+            workload_evidence["speed_bench"] = {
+                "suite": SPEED_BENCH_SUITES[args.dataset_name],
+                "repo_id": SPEED_BENCH_REPO_ID,
+                "revision": SPEED_BENCH_REVISION,
+                "category": args.speed_bench_category,
+                "output_len": args.speed_bench_output_len,
+            }
+        result["profile_run"] = {
+            "profile_id": args.profile_id,
+            "evidence_class": args.profile_evidence_class,
+            "bundle_path": str(bundle_output_path),
+            "targets": profile_targets,
+        }
+
     result_details = {
         "input_lens": [output.prompt_len for output in outputs],
         "output_lens": output_lens,
@@ -1914,6 +2027,18 @@ async def benchmark(
         else:
             result_for_dump = result
         file.write(json.dumps(result_for_dump) + "\n")
+
+    if bundle_output_path is not None:
+        write_profile_run_bundle(
+            bundle_output_path,
+            profile_id=args.profile_id,
+            evidence_class=args.profile_evidence_class,
+            workload=workload_evidence,
+            profile_targets=profile_targets,
+            benchmark_record=result_for_dump,
+            speculative=speculative_summary,
+        )
+        print(f"Profile run bundle: {bundle_output_path}")
 
     return result | result_details
 
@@ -1984,6 +2109,13 @@ def run_benchmark(args_: argparse.Namespace):
 
     if not hasattr(args, "cache_report"):
         args.cache_report = False
+
+    if not hasattr(args, "profile_id"):
+        args.profile_id = None
+    if not hasattr(args, "profile_evidence_class"):
+        args.profile_evidence_class = "diagnostic"
+    if not hasattr(args, "profile_bundle_output"):
+        args.profile_bundle_output = None
 
     if getattr(args, "print_requests", False):
         assert args.backend == "sglang-oai-chat"  # only support this now
@@ -2535,6 +2667,24 @@ def cli_main():
         type=str,
         default=None,
         help="Output directory for profile traces.",
+    )
+    parser.add_argument(
+        "--profile-id",
+        type=str,
+        default=None,
+        help="Stable run ID sent to every profiler rank. A unique ID is generated if omitted.",
+    )
+    parser.add_argument(
+        "--profile-evidence-class",
+        choices=["diagnostic", "deployment-proxy", "production-equivalent"],
+        default="diagnostic",
+        help="Declare how closely this hardware and topology represent production.",
+    )
+    parser.add_argument(
+        "--profile-bundle-output",
+        type=str,
+        default=None,
+        help="Path for the workload, benchmark, and profile join bundle.",
     )
     parser.add_argument(
         "--profile-prefix",

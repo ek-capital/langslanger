@@ -72,9 +72,6 @@ instance/
 # Scrapy stuff:
 .scrapy
 
-# Sphinx documentation
-docs/_build/
-
 # PyBuilder
 .pybuilder/
 target/
@@ -169,9 +166,6 @@ cython_debug/
 # Vim
 *.swp
 
-# Documentation
-docs/_build
-
 # SGL
 benchmark/mmlu/data
 benchmark/mmlu/data.tar
@@ -193,7 +187,7 @@ work_dirs/
 *.csv
 
 !logo.png
-!docs_new/images/*.png
+!docs/images/*.png
 
 # Prerequisites
 *.d
@@ -264,9 +258,9 @@ python/kernel.lock
 
 # MUSA section
 # Generated source files by torchada
-sgl-kernel/csrc_musa/
-sgl-kernel/include_musa/
-sgl-kernel/csrc/**/*_musa/
+python/sglang/kernels/aot/csrc_musa/
+python/sglang/kernels/aot/include_musa/
+python/sglang/kernels/aot/csrc/**/*_musa/
 
 # MUSA core dump files
 *.mudmp

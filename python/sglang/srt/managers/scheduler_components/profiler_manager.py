@@ -24,7 +24,7 @@ from sglang.srt.observability.profile_scope import (
     stop_profile_recording,
 )
 from sglang.srt.platforms import current_platform
-from sglang.srt.runtime_context import get_server_args
+from sglang.srt.runtime_context import get_device
 from sglang.srt.utils import is_mps, is_npu
 from sglang.srt.utils.profile_merger import ProfileMerger
 from sglang.srt.utils.profile_utils import ProfileManager
@@ -258,11 +258,13 @@ class SchedulerProfilerManager:
             self.profile_in_progress = True
 
         if "MEM" in activities:
-            torch.cuda.memory._record_memory_history(max_entries=100000)
+            torch.cuda.memory._record_memory_history(
+                max_entries=envs.SGLANG_MEM_PROFILE_MAX_ENTRIES.get()
+            )
             self.profile_in_progress = True
 
         if "CUDA_PROFILER" in activities:
-            if self.ps.gpu_id == get_server_args().base_gpu_id:
+            if self.ps.gpu_id == get_device().base_gpu_id:
                 torch.cuda.cudart().cudaProfilerStart()
             self.profile_in_progress = True
 
@@ -374,7 +376,8 @@ class SchedulerProfilerManager:
         if self.profiler_activities is not None and "MEM" in self.profiler_activities:
             memory_profile_path = os.path.join(
                 self.torch_profiler_output_dir,
-                str(time.time())
+                stage_prefix
+                + str(time.time())
                 + f"-TP-{self.ps.tp_rank}-memory"
                 + stage_suffix
                 + ".pickle",
@@ -384,7 +387,7 @@ class SchedulerProfilerManager:
             artifact_paths.append(memory_profile_path)
 
         if "CUDA_PROFILER" in self.profiler_activities:
-            if self.ps.gpu_id == get_server_args().base_gpu_id:
+            if self.ps.gpu_id == get_device().base_gpu_id:
                 torch.cuda.cudart().cudaProfilerStop()
 
         sidecar_path = stop_profile_recording()

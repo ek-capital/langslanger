@@ -68,6 +68,7 @@ dependencies = [
   "tqdm",
   "transformers==5.12.1",
   "uvicorn",
+  "xxhash",
   "uvloop",
   # "xgrammar==0.2.1", xgrammar depends on CUDA PyTorch and Triton only
 ]
@@ -131,7 +132,7 @@ sglang = "sglang.cli.main:main"
 [tool.setuptools.package-data]
 "sglang" = [
   "srt/**/*",
-  "jit_kernel/**/*"
+  "kernels/**/*"
 ]
 
 [tool.setuptools.packages.find]

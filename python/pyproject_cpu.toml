@@ -70,6 +70,7 @@ dependencies = [
   "triton==3.7.0",
   "uvicorn",
   "uvloop",
+  "xxhash",
   "xgrammar==0.2.1",
   "zstandard",
 ]
@@ -124,7 +125,7 @@ sglang = "sglang.cli.main:main"
 [tool.setuptools.package-data]
 "sglang" = [
   "srt/**/*",
-  "jit_kernel/**/*"
+  "kernels/**/*"
 ]
 
 [tool.setuptools.packages.find]

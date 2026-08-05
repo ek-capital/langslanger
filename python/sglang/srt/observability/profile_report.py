@@ -12,12 +12,13 @@ import hashlib
 import json
 import math
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
-PROFILE_REPORT_SCHEMA_VERSION = 1
+PROFILE_REPORT_SCHEMA_VERSION = 2
 _GPU_CATEGORIES = {"kernel", "gpu_memcpy", "gpu_memset", "gpu_user_annotation"}
 
 
@@ -62,10 +63,13 @@ def analyze_profile(profile_dir: str | Path, profile_id: str | None = None):
     profile_id = next(iter(resolved_ids))
 
     warnings: list[str] = []
+    rank_manifest_coverage = _validate_manifest_set(manifests)
+    warnings.extend(rank_manifest_coverage.pop("warnings"))
     integrity = {"verified": 0, "failed": 0, "missing": 0}
     all_invocations: list[tuple[dict[str, Any], _ScopeInvocation]] = []
     scheduler_results: list[tuple[dict[str, Any], dict[str, Any]]] = []
     implementation_records: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    incomplete_rank_artifacts: list[str] = []
     total_gpu_events = 0
     attributed_gpu_events: set[tuple[str, int]] = set()
     total_gpu_work_us = 0.0
@@ -77,9 +81,11 @@ def analyze_profile(profile_dir: str | Path, profile_id: str | None = None):
         step_paths = [path for path in artifacts if path.name.endswith(".steps.jsonl")]
         if not trace_paths:
             warnings.append(f"{manifest_path.name}: no Kineto trace artifact")
+            incomplete_rank_artifacts.append(f"{manifest_path.name}:trace")
             continue
         if not step_paths:
             warnings.append(f"{manifest_path.name}: no step sidecar artifact")
+            incomplete_rank_artifacts.append(f"{manifest_path.name}:steps")
             continue
 
         sidecar_records = _read_jsonl(step_paths[0])
@@ -129,6 +135,14 @@ def analyze_profile(profile_dir: str | Path, profile_id: str | None = None):
         warnings.append(f"{integrity['failed']} artifacts failed checksum validation")
     if integrity["missing"]:
         warnings.append(f"{integrity['missing']} manifest artifacts are missing")
+    if rank_manifest_coverage["strict"] and (
+        integrity["failed"] or integrity["missing"] or incomplete_rank_artifacts
+    ):
+        raise ValueError(
+            "profile artifact integrity failed: "
+            f"failed={integrity['failed']} missing={integrity['missing']} "
+            f"incomplete_ranks={incomplete_rank_artifacts}"
+        )
 
     coverage = (
         len(attributed_gpu_events) / total_gpu_events if total_gpu_events else None
@@ -152,6 +166,7 @@ def analyze_profile(profile_dir: str | Path, profile_id: str | None = None):
         },
         "coverage": {
             "manifests": len(manifests),
+            "rank_manifests": rank_manifest_coverage,
             "artifact_integrity": integrity,
             "gpu_events": total_gpu_events,
             "attributed_gpu_events": len(attributed_gpu_events),
@@ -212,6 +227,95 @@ def _load_manifests(profile_dir: Path, profile_id: str | None):
         if profile_id is None or manifest.get("profile_id") == profile_id:
             manifests.append((path, manifest))
     return manifests
+
+
+def _validate_manifest_set(manifests):
+    """Fail closed when a v2 profile is missing or mixes participating ranks."""
+    schema_versions = {manifest.get("schema_version", 1) for _, manifest in manifests}
+    if schema_versions == {1}:
+        return {
+            "strict": False,
+            "complete": None,
+            "stages": [],
+            "warnings": ["legacy v1 manifests do not prove all-rank completeness"],
+        }
+    if schema_versions != {2}:
+        raise ValueError(
+            "profile mixes manifest schema versions: "
+            + ", ".join(str(version) for version in sorted(schema_versions))
+        )
+
+    by_stage = defaultdict(list)
+    for path, manifest in manifests:
+        by_stage[manifest.get("stage")].append((path, manifest))
+
+    stage_coverage = []
+    for stage, stage_manifests in sorted(
+        by_stage.items(), key=lambda item: str(item[0])
+    ):
+        world_sizes = {
+            manifest.get("process", {}).get("world_size")
+            for _, manifest in stage_manifests
+        }
+        if len(world_sizes) != 1 or None in world_sizes:
+            raise ValueError(
+                f"stage {stage or 'all'} has inconsistent or missing world_size: "
+                f"{sorted(str(size) for size in world_sizes)}"
+            )
+        world_size = next(iter(world_sizes))
+        if not isinstance(world_size, int) or world_size < 1:
+            raise ValueError(
+                f"stage {stage or 'all'} has invalid world_size={world_size}"
+            )
+
+        fingerprints = {
+            manifest.get("run_fingerprint") for _, manifest in stage_manifests
+        }
+        if len(fingerprints) != 1 or None in fingerprints:
+            raise ValueError(
+                f"stage {stage or 'all'} has inconsistent run fingerprints"
+            )
+
+        ranks = [
+            manifest.get("process", {}).get("global_rank")
+            for _, manifest in stage_manifests
+        ]
+        non_integer_ranks = [rank for rank in ranks if not isinstance(rank, int)]
+        if non_integer_ranks:
+            raise ValueError(
+                f"stage {stage or 'all'} has missing global ranks: {non_integer_ranks}"
+            )
+        observed = set(ranks)
+        duplicate_ranks = sorted(rank for rank in observed if ranks.count(rank) > 1)
+        expected = set(range(world_size))
+        missing = sorted(expected - observed)
+        unexpected = sorted(observed - expected)
+        labels = [manifest.get("rank_label") for _, manifest in stage_manifests]
+        duplicate_labels = sorted(
+            str(label) for label in set(labels) if labels.count(label) > 1
+        )
+        if missing or unexpected or duplicate_ranks or duplicate_labels:
+            raise ValueError(
+                f"stage {stage or 'all'} rank coverage failed: missing={missing} "
+                f"unexpected={unexpected} duplicate_ranks={duplicate_ranks} "
+                f"duplicate_labels={duplicate_labels}"
+            )
+        stage_coverage.append(
+            {
+                "stage": stage,
+                "world_size": world_size,
+                "observed_global_ranks": sorted(observed),
+                "run_fingerprint": next(iter(fingerprints)),
+                "complete": True,
+            }
+        )
+
+    return {
+        "strict": True,
+        "complete": True,
+        "stages": stage_coverage,
+        "warnings": [],
+    }
 
 
 def _resolve_artifacts(

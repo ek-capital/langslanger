@@ -151,9 +151,14 @@ class TestProfileReport(unittest.TestCase):
                 manifest_path.write_text(
                     json.dumps(
                         {
-                            "schema_version": 1,
+                            "schema_version": 2,
                             "profile_id": "run",
                             "rank_label": f"TP-{rank}",
+                            "run_fingerprint": "same-run",
+                            "process": {
+                                "global_rank": rank,
+                                "world_size": 2,
+                            },
                             "parallel": {"tp_rank": rank, "dp_rank": 0},
                             "artifacts": [_artifact(trace_path), _artifact(steps_path)],
                         }
@@ -162,8 +167,47 @@ class TestProfileReport(unittest.TestCase):
 
             report = analyze_profile(profile_dir)
             self.assertEqual(report["normalization"]["committed_tokens"], 5)
+            self.assertTrue(report["coverage"]["rank_manifests"]["complete"])
             self.assertEqual(report["scopes"][0]["slowest_observed_rank"], "TP-1")
             self.assertIsNone(report["ranks"][1]["distributed_critical_path_ms"])
+
+    def test_rejects_missing_v2_rank_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            profile_dir = Path(temporary_dir)
+            (profile_dir / "run-TP-0.manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "profile_id": "run",
+                        "rank_label": "TP-0",
+                        "run_fingerprint": "same-run",
+                        "process": {"global_rank": 0, "world_size": 2},
+                        "artifacts": [],
+                    }
+                )
+            )
+
+            with self.assertRaisesRegex(ValueError, "missing=\\[1\\]"):
+                analyze_profile(profile_dir)
+
+    def test_rejects_v2_rank_without_profile_artifacts(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            profile_dir = Path(temporary_dir)
+            (profile_dir / "run-TP-0.manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "profile_id": "run",
+                        "rank_label": "TP-0",
+                        "run_fingerprint": "same-run",
+                        "process": {"global_rank": 0, "world_size": 1},
+                        "artifacts": [],
+                    }
+                )
+            )
+
+            with self.assertRaisesRegex(ValueError, "incomplete_ranks"):
+                analyze_profile(profile_dir)
 
 
 def _event(name, category, start, duration, external_id, pid=1, tid=1):

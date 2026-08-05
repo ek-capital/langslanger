@@ -1,5 +1,7 @@
-"""Fail when LangSlanger CI can silently target unavailable or wrong hardware."""
+"""Fail when LangSlanger repository automation drifts from its safety policy."""
 
+import json
+import re
 from pathlib import Path
 
 import yaml
@@ -46,6 +48,13 @@ DISPATCH_JOBS = {
 UNSAFE_SKIPPED_GATE = (
     "needs.call-gate.result == 'success' || " "needs.call-gate.result == 'skipped'"
 )
+REMOVED_UPSTREAM_SKILLS = (
+    "cookbook-add-model",
+    "cookbook-migrate-model",
+    "cookbook-review-pr",
+    "sglang-cherrypick",
+    "sglang-bisect-ci-regression",
+)
 
 
 def load_workflow(name: str):
@@ -71,6 +80,83 @@ def main() -> None:
         "upstream publishing or bot workflows returned: "
         + ", ".join(sorted(forbidden_names)),
     )
+
+    baseline = json.loads((ROOT / "UPSTREAM_BASE.json").read_text(encoding="utf-8"))
+    require(
+        set(baseline) == {"schema_version", "repository", "release_tag", "commit"},
+        "UPSTREAM_BASE.json has unexpected fields",
+    )
+    require(baseline["schema_version"] == 1, "unsupported upstream baseline schema")
+    require(
+        baseline["repository"] == "sgl-project/sglang",
+        "compatibility baseline must identify the upstream SGLang repository",
+    )
+    require(
+        re.fullmatch(r"v\d+\.\d+\.\d+", baseline["release_tag"]) is not None,
+        "upstream release tag is not a stable release",
+    )
+    require(
+        re.fullmatch(r"[0-9a-f]{40}", baseline["commit"]) is not None,
+        "upstream baseline commit is not immutable",
+    )
+
+    upstream_workflow = load_workflow("upstream-release-check.yml")
+    require(
+        set(upstream_workflow["on"]) == {"schedule", "workflow_dispatch"},
+        "upstream release checker must be scheduled or manually dispatched only",
+    )
+    require(
+        upstream_workflow["permissions"] == {"contents": "read", "issues": "write"},
+        "upstream release checker has permissions beyond read plus issue reporting",
+    )
+    require(
+        "github.repository == 'ek-capital/langslanger'"
+        in upstream_workflow["jobs"]["check"]["if"],
+        "upstream release checker can run in another repository",
+    )
+    upstream_source = (WORKFLOW_DIR / "upstream-release-check.yml").read_text(
+        encoding="utf-8"
+    )
+    for required in (
+        "UPSTREAM_BASE.json",
+        "getLatestRelease",
+        "latest stable SGLang release",
+        "issues.create",
+        "issues.update",
+    ):
+        require(
+            required in upstream_source,
+            f"upstream release checker is missing {required!r}",
+        )
+    for forbidden in (
+        "contents: write",
+        "pulls.create",
+        "createPullRequest",
+        "git push",
+        "git merge",
+    ):
+        require(
+            forbidden not in upstream_source,
+            f"upstream release checker can mutate code via {forbidden!r}",
+        )
+
+    skills_dir = ROOT / ".claude" / "skills"
+    for removed_skill in REMOVED_UPSTREAM_SKILLS:
+        require(
+            not (skills_dir / removed_skill / "SKILL.md").exists(),
+            f"obsolete upstream-oriented skill returned: {removed_skill}",
+        )
+    bisect_skill = (
+        skills_dir / "langslanger-bisect-ci-regression" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    for required in (
+        "name: langslanger-bisect-ci-regression",
+        "ek-capital/langslanger",
+        "explicit read-only comparison source",
+    ):
+        require(
+            required in bisect_skill, f"LangSlanger bisect skill misses {required!r}"
+        )
 
     image_workflow = load_workflow("langslanger-image.yml")
     require(

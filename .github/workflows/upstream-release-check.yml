@@ -1,0 +1,134 @@
+name: Check Upstream SGLang Release
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    if: github.repository == 'ek-capital/langslanger'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare the compatibility baseline with the latest stable release
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require("fs");
+
+            const baseline = JSON.parse(
+              fs.readFileSync("UPSTREAM_BASE.json", "utf8"),
+            );
+            const [upstreamOwner, upstreamRepo] = baseline.repository.split("/");
+            if (!upstreamOwner || !upstreamRepo) {
+              core.setFailed("UPSTREAM_BASE.json has an invalid repository");
+              return;
+            }
+
+            const { data: release } = await github.rest.repos.getLatestRelease({
+              owner: upstreamOwner,
+              repo: upstreamRepo,
+            });
+            const latestTag = release.tag_name;
+            const { data: latestCommit } = await github.rest.repos.getCommit({
+              owner: upstreamOwner,
+              repo: upstreamRepo,
+              ref: latestTag,
+            });
+
+            await core.summary
+              .addHeading("Upstream SGLang release check")
+              .addTable([
+                [
+                  { data: "", header: true },
+                  { data: "Baseline", header: true },
+                  { data: "Latest stable", header: true },
+                ],
+                ["Tag", baseline.release_tag, latestTag],
+                ["Commit", baseline.commit, latestCommit.sha],
+              ])
+              .write();
+
+            const issueTitle = "chore: sync latest stable SGLang release";
+            const openIssues = await github.paginate(
+              github.rest.issues.listForRepo,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: "open",
+                per_page: 100,
+              },
+            );
+            const existing = openIssues.find(
+              (issue) => !issue.pull_request && issue.title === issueTitle,
+            );
+
+            if (
+              baseline.release_tag === latestTag &&
+              baseline.commit === latestCommit.sha
+            ) {
+              core.notice(`LangSlanger is based on the latest stable release ${latestTag}`);
+              if (existing) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: existing.number,
+                  body: `Baseline updated to ${latestTag} at ${latestCommit.sha}. Closing this tracker.`,
+                });
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: existing.number,
+                  state: "closed",
+                });
+              }
+              return;
+            }
+
+            const compareUrl =
+              `https://github.com/${baseline.repository}/compare/` +
+              `${baseline.release_tag}...${latestTag}`;
+            const body = `<!-- langslanger-upstream-sync -->
+            A newer stable SGLang release is available.
+
+            | | LangSlanger baseline | Latest stable upstream |
+            |---|---|---|
+            | Tag | \`${baseline.release_tag}\` | \`${latestTag}\` |
+            | Commit | \`${baseline.commit}\` | \`${latestCommit.sha}\` |
+
+            [Review the upstream diff](${compareUrl}).
+
+            A maintainer should open a dedicated sync PR that:
+
+            - merges the tagged upstream commit without rewriting LangSlanger history;
+            - rejects reintroduced upstream branding, documentation, bots, and publishing workflows;
+            - updates \`UPSTREAM_BASE.json\` only after conflicts are resolved;
+            - runs compatibility, profiling, and relevant GPU tests; and
+            - includes before/after performance evidence for affected hot paths.
+
+            This workflow only reports release drift. It never changes code or opens a PR.`;
+
+            if (existing) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body,
+              });
+              core.notice(`Updated issue #${existing.number}`);
+            } else {
+              const { data: created } = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: issueTitle,
+                body,
+              });
+              core.notice(`Opened issue #${created.number}`);
+            }

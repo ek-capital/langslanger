@@ -17,6 +17,8 @@ facade as aliases over the same runtime.
 
 The current compatibility baseline is
 [SGLang v0.5.16](https://github.com/sgl-project/sglang/releases/tag/v0.5.16).
+Its exact upstream repository, tag, and commit are recorded in
+[`UPSTREAM_BASE.json`](UPSTREAM_BASE.json).
 
 LangSlanger-specific flags, configuration fields, and environment variables use
 the `langslanger` or `LANGSLANGER_*` namespace.
@@ -71,6 +73,18 @@ engineering and evidence requirements.
 
 Maintainer: [@evmcheb](https://github.com/evmcheb)
 Contact: [contact@ek.capital](mailto:contact@ek.capital)
+
+## Upstream updates
+
+A daily read-only check compares `UPSTREAM_BASE.json` with SGLang's latest
+stable release. When they differ, it opens or updates one tracking issue. It
+never modifies code or opens a pull request.
+
+Upstream updates are deliberate maintainer-owned PRs. Merge the tagged upstream
+commit without rewriting LangSlanger history, reject reintroduced upstream
+branding and automation, resolve compatibility changes, then update
+`UPSTREAM_BASE.json`. Run the compatibility and profiling checks plus the GPU
+tests relevant to the changed paths before merging.
 
 ## Upstream and license
 

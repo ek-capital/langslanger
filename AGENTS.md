@@ -71,6 +71,45 @@ practical, and make future rebases or cherry-picks straightforward.
 - Respect existing code until its purpose and tests are understood. Preserve
   unrelated working-tree changes.
 
+## Grugbrain engineering bias
+
+Use [The Grug Brained Developer](https://grugbrain.dev/) as a default
+tie-breaker: complexity is a real cost, including complexity added with good
+intentions. Keep all required behavior and evidence, but implement them in the
+most direct form that remains correct and debuggable.
+
+- Start with the 80/20 solution that answers the present measured question. Do
+  not build extension points, registries, services, configuration languages, or
+  generalized frameworks for hypothetical future experiments.
+- Let stable cut points emerge from real uses before extracting an abstraction.
+  Prefer a narrow function and plain data over a class hierarchy or callback
+  graph. A little obvious duplication is often cheaper than a premature DRY
+  mechanism.
+- Keep behavior local to the thing that performs it. A dispatch decision, its
+  profiler declaration, and its source attribution should be understandable by
+  reading the same execution path.
+- Prefer linear control flow, named intermediate values, and explicit state.
+  Avoid dense expressions, clever metaprogramming, unnecessary generics, and
+  hidden global behavior when ordinary code will do.
+- Understand an existing fence before removing or redesigning it. Make small
+  refactors that leave the repository working after each step, and avoid broad
+  cleanup around a focused experiment.
+- Use tools and structured logging to make runtime behavior visible. Carry a
+  profile, request, or iteration identifier through related evidence, and keep
+  diagnostic collection dynamically controllable.
+- Test the real cut point. Favor focused integration tests, add a regression
+  test before fixing a reproduced bug, keep end-to-end coverage small and
+  valuable, and mock only where the real boundary is impractical.
+- Treat concurrency and distributed state as complexity multipliers. Reuse the
+  runtime's existing ownership and synchronization model; do not add background
+  coordination or shared mutable state without a measured need.
+
+Simplicity is not permission to weaken evidence. Do not drop ranks, conflate
+overlapping GPU work with elapsed time, guess a kernel-to-source mapping, or
+substitute a microbenchmark for serving validation merely because doing so is
+easier. When the simple implementation cannot prove a claim, report the result
+as unknown and add only the smallest missing measurement needed to resolve it.
+
 ## Performance work
 
 Do not optimize from intuition alone. Begin with a concrete profile or benchmark

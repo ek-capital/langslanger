@@ -65,7 +65,9 @@ Select with `--dataset-name`:
 - `image`: generates images and wraps them in chat messages; supports custom resolutions, multiple formats, and different content types
 - `generated-shared-prefix`: synthetic dataset with shared long system prompts and short questions
 - `mmmu`: samples from MMMU (Math split) and includes images
-- `speed-bench`: [SPEED-Bench](https://huggingface.co/datasets/nvidia/SPEED-Bench) (**SPEculative Evaluation Dataset**) — a unified benchmark for evaluating [Speculative Decoding (SD)](https://arxiv.org/abs/2604.09557) algorithms. Uses the Throughput split, which provides fixed-length input sequences (1K–32K tokens) grouped into three output-entropy categories (`low_entropy`, `mixed`, `high_entropy`). Requires a pre-downloaded JSONL file passed via `--dataset-path`.
+- `speed-bench-qualitative`: LangSlanger's canonical semantic and speculative-decoding workload. It preserves the full SPEED-Bench conversation and covers 11 categories with 80 prompts each. Use a chat backend.
+- `speed-bench-throughput`: LangSlanger's canonical system-performance workload. It uses the SPEED-Bench fixed-input-length artifacts (1K, 2K, 8K, 16K, and 32K), each split into `low_entropy`, `mixed`, and `high_entropy` categories.
+- `speed-bench`: compatibility alias for `speed-bench-throughput`; prefer the explicit canonical name in new results.
 - `agentic-trace`: replays pre-built multi-turn agentic traces (e.g. OpenHands / SWE-smith). Each conversation is replayed round by round, feeding the server's real assistant reply back into the next round's history. Requires a chat backend (`--backend sglang-oai-chat`) and a trace JSON passed via `--dataset-path`.
 
 Common dataset flags:
@@ -101,11 +103,13 @@ Agentic trace flags (for `agentic-trace`):
 - `--dataset-offset`: rotate the conversation list by this many entries before sampling, so successive sweep steps start on fresh conversations
 - `--agentic-max-turns`: cap each conversation to at most this many turns (useful for small, fast profiling runs)
 
-SPEED-Bench flags (for `speed-bench`):
+SPEED-Bench flags:
 
-- `--dataset-path PATH`: path to the pre-downloaded SPEED-Bench Throughput JSONL (e.g., `throughput_1k.jsonl`). Use the [SPEED-Bench measurement framework](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/specdec_bench) to generate it.
-- `--speed-bench-category`: filter to one entropy category: `low_entropy`, `mixed`, or `high_entropy` (default: all)
+- `--dataset-path PATH`: path to a source-complete JSONL artifact produced by the [SPEED-Bench measurement framework](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/specdec_bench). Raw Hugging Face rows containing source placeholders are rejected.
+- `--speed-bench-category`: for `speed-bench-qualitative`, one of `coding`, `humanities`, `math`, `multilingual`, `qa`, `rag`, `reasoning`, `roleplay`, `stem`, `summarization`, or `writing`; for `speed-bench-throughput`, one of `low_entropy`, `mixed`, or `high_entropy` (default: all)
 - `--speed-bench-output-len`: fixed number of output tokens per request (default: 512)
+
+For reproducible LangSlanger results, use Hugging Face dataset `nvidia/SPEED-Bench` at revision `487aa718444e816458d1a0a52bfce7a454285cf4` and retain the materialized JSONL SHA-256 emitted in the benchmark result. Synthetic datasets remain useful controls, but they are not canonical semantic workloads.
 
 ### Examples
 
@@ -142,7 +146,7 @@ python3 -m sglang.bench_serving \
     --random-range-ratio 0.5
 ```
 
-3. To benchmark speculative decoding throughput using SPEED-Bench (mixed-entropy category, 1K ISL), you can run:
+3. To benchmark speculative-decoding acceptance across the qualitative coding category, use a chat backend:
 
 ```bash Command
 python -m sglang.launch_server --model-path meta-llama/Llama-3.1-8B-Instruct \
@@ -151,8 +155,20 @@ python -m sglang.launch_server --model-path meta-llama/Llama-3.1-8B-Instruct \
 
 ```bash Command
 python3 -m sglang.bench_serving \
+    --backend sglang-oai-chat \
+    --dataset-name speed-bench-qualitative \
+    --dataset-path /path/to/qualitative.jsonl \
+    --speed-bench-category coding \
+    --speed-bench-output-len 512 \
+    --num-prompts 80
+```
+
+4. To profile serving throughput using the mixed-entropy 1K input-length artifact:
+
+```bash Command
+python3 -m sglang.bench_serving \
     --backend sglang \
-    --dataset-name speed-bench \
+    --dataset-name speed-bench-throughput \
     --dataset-path /path/to/throughput_1k.jsonl \
     --speed-bench-category mixed \
     --speed-bench-output-len 512 \

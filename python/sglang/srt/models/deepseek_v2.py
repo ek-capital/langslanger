@@ -182,6 +182,7 @@ from sglang.srt.models.deepseek_common.utils import (
     _use_aiter_gfx95,
     is_wint4afp8_or_wint4a16_config,
 )
+from sglang.srt.observability.profile_scope import record_profile_impl
 from sglang.srt.runtime_context import (
     get_flags,
     get_forward,
@@ -1830,7 +1831,20 @@ class DeepseekV2AttentionMLA(
         self.current_attention_backend = attention_backend
 
         handler = AttentionBackendRegistry.get_handler(attention_backend)
-        return handler(self, forward_batch)
+        method = handler(self, forward_batch)
+        record_profile_impl(
+            "model.attention.mla",
+            f"{attention_backend}:{method.name.lower()}",
+            source_objects=(handler, type(backend)),
+            conditions={
+                "layer": self.layer_id,
+                "forward_mode": forward_batch.forward_mode.name.lower(),
+                "attention_backend": attention_backend,
+                "attention_method": method.name.lower(),
+                "speculative_attention_mode": server_args.speculative_attention_mode,
+            },
+        )
+        return method
 
     def op_prepare(self, state):
         state.attn_intermediate_state = self.forward_prepare(

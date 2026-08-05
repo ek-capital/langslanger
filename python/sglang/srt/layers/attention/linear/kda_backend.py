@@ -8,6 +8,9 @@ from sglang.kernels.ops.mamba.causal_conv1d_triton import (
 )
 from sglang.srt.layers.attention.hybrid_linear_attn_backend import MambaAttnBackendBase
 from sglang.srt.layers.attention.linear.kernels.kda_triton import TritonKDAKernel
+from sglang.srt.layers.attention.linear.kernels.kernel_backend import (
+    LinearAttnKernelBase,
+)
 from sglang.srt.layers.attention.linear.utils import (
     LinearAttnKernelBackend,
     get_linear_attn_decode_backend,
@@ -30,6 +33,7 @@ elif is_cpu():
 
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_executor.model_runner import ModelRunner
+from sglang.srt.observability.profile_scope import record_profile_impl
 
 
 class KDAKernelDispatcher:
@@ -122,6 +126,66 @@ class KDAKernelDispatcher:
             f"packed_decode={self.supports_packed_decode}"
         )
 
+    @staticmethod
+    def _record_kernel(operation: str, kernel: LinearAttnKernelBase) -> None:
+        class_name = type(kernel).__name__
+        source_files: tuple[str, ...] = ()
+        expected_symbols: tuple[str, ...] = ()
+        loaded_modules: tuple[str, ...] = ()
+        if class_name == "TritonKDAKernel":
+            source_files = {
+                "packed_decode": (
+                    "python/sglang/kernels/ops/attention/fla/fused_recurrent.py",
+                    "python/sglang/kernels/ops/attention/fla/fused_recurrent_linear_replayssm.py",
+                ),
+                "decode": (
+                    "python/sglang/kernels/ops/attention/fla/fused_sigmoid_gating_recurrent.py",
+                ),
+                "target_verify": (
+                    "python/sglang/kernels/ops/attention/fla/fused_sigmoid_gating_recurrent.py",
+                ),
+                "extend": ("python/sglang/kernels/ops/attention/fla/kda.py",),
+            }.get(operation, ())
+            expected_symbols = {
+                "packed_decode": (
+                    "fused_recurrent_kda_packed_decode",
+                    "fused_recurrent_linear_replayssm_decode",
+                ),
+                "decode": ("fused_sigmoid_gating_delta_rule_update",),
+                "target_verify": ("fused_sigmoid_gating_delta_rule_update",),
+                "extend": ("chunk_kda",),
+            }.get(operation, ())
+            loaded_modules = ("triton",)
+        elif class_name == "CuteDSLKDAKernel":
+            source_files = (
+                "python/sglang/jit_kernel/cutedsl_kda.py",
+                "python/sglang/kernels/ops/attention/linear/kda_blackwell/kernel_h.py",
+                "python/sglang/kernels/ops/attention/linear/kda_blackwell/kernel_o.py",
+            )
+            expected_symbols = (
+                "cutedsl_fused_sigmoid_gating_kda_update",
+                "chunk_kda_cutedsl",
+            )
+        elif class_name == "FlashInferKDAKernel":
+            expected_symbols = ("recurrent_kda",)
+            loaded_modules = ("flashinfer",)
+        elif class_name == "FlashKDAKernel":
+            expected_symbols = ("flash_kda", "chunk_kda")
+            loaded_modules = ("flash_kda",)
+
+        method = getattr(kernel, operation, None)
+        record_profile_impl(
+            "model.attention.kda",
+            f"{class_name}.{operation}",
+            source_objects=tuple(
+                obj for obj in (type(kernel), method) if obj is not None
+            ),
+            source_files=source_files,
+            expected_symbols=expected_symbols,
+            loaded_modules=loaded_modules,
+            conditions={"operation": operation},
+        )
+
     def packed_decode(
         self,
         mixed_qkv: torch.Tensor,
@@ -141,6 +205,7 @@ class KDAKernelDispatcher:
         kernel does not support packed decode."""
         if not self.supports_packed_decode:
             return None
+        self._record_kernel("packed_decode", self.decode_kernel)
         return self.decode_kernel.packed_decode(
             mixed_qkv,
             a,
@@ -170,6 +235,7 @@ class KDAKernelDispatcher:
         query_start_loc: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
+        self._record_kernel("decode", self.decode_kernel)
         return self.decode_kernel.decode(
             q,
             k,
@@ -206,6 +272,7 @@ class KDAKernelDispatcher:
         """MTP / speculative-decode verify, routed to ``self.verify_kernel``
         (FlashInfer decode -> recurrent_kda; Triton / CuTe DSL decode -> the Triton
         fused KDA verify)."""
+        self._record_kernel("target_verify", self.verify_kernel)
         return self.verify_kernel.target_verify(
             A_log=A_log,
             dt_bias=dt_bias,
@@ -236,6 +303,7 @@ class KDAKernelDispatcher:
         query_start_loc: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
+        self._record_kernel("extend", self.extend_kernel)
         return self.extend_kernel.extend(
             q,
             k,

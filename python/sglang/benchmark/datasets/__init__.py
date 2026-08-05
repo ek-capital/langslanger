@@ -14,7 +14,12 @@ from sglang.benchmark.datasets.mooncake import MooncakeDataset
 from sglang.benchmark.datasets.openai_dataset import OpenAIDataset
 from sglang.benchmark.datasets.random import RandomDataset
 from sglang.benchmark.datasets.sharegpt import ShareGPTDataset
-from sglang.benchmark.datasets.speed_bench import SpeedBenchDataset
+from sglang.benchmark.datasets.speed_bench import (
+    SPEED_BENCH_LEGACY,
+    SPEED_BENCH_QUALITATIVE,
+    SPEED_BENCH_THROUGHPUT,
+    SpeedBenchDataset,
+)
 
 DATASET_MAPPING: Dict[str, Type[BaseDataset]] = {
     "agentic-trace": AgenticTraceDataset,
@@ -31,7 +36,9 @@ DATASET_MAPPING: Dict[str, Type[BaseDataset]] = {
     "image": ImageDataset,
     "mooncake": MooncakeDataset,
     "longbench_v2": LongBenchV2Dataset,
-    "speed-bench": SpeedBenchDataset,
+    SPEED_BENCH_QUALITATIVE: SpeedBenchDataset,
+    SPEED_BENCH_THROUGHPUT: SpeedBenchDataset,
+    SPEED_BENCH_LEGACY: SpeedBenchDataset,
 }
 
 

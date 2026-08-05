@@ -32,6 +32,7 @@ from sglang.srt.model_executor.runner_backend.utils import resolve_decode_backen
 from sglang.srt.model_executor.runner_backend_utils import (
     CUDA_GRAPH_CAPTURE_FAILED_MSG,
 )
+from sglang.srt.observability.profile_scope import batch_bucket, profile_scope
 from sglang.srt.runtime_context import get_flags
 from sglang.srt.speculative.frozen_kv_mtp_info import FrozenKVMTPDraftInput
 from sglang.srt.speculative.spec_utils import resolve_num_tokens_per_req
@@ -444,12 +445,16 @@ class FrozenKVMTPCudaGraphRunner(DecodeCudaGraphRunner):
         self.raw_bs = raw_bs
         self.bs = bs
         shape_key = self._make_graph_key(bs)
-        # NVTX span: the graph bypasses `model_runner.forward`'s record_function.
-        span_name = f"step[DRAFT_LOOP raw_bs={raw_bs} bs={bs} topk={self.topk}]"
-        if torch.autograd._profiler_enabled():
-            with torch.profiler.record_function(span_name):
-                out = self._replay_graph(shape_key, forward_batch)
-        else:
+        # This graph bypasses model_runner.forward, so retain a stable semantic
+        # scope here and put its dynamic shape in the structured sidecar.
+        with profile_scope(
+            "spec.draft",
+            raw_batch_size=raw_bs,
+            batch_size=bs,
+            batch_bucket=batch_bucket(raw_bs),
+            topk=self.topk,
+            graph_key=str(shape_key),
+        ):
             out = self._replay_graph(shape_key, forward_batch)
 
         if bs != raw_bs:

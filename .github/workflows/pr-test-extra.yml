@@ -37,6 +37,11 @@ on:
         required: false
         type: boolean
         default: false
+      enable_upstream_full_ci:
+        description: "Enable upstream hardware outside the LangSlanger RunPod fleet (B200 and 8-GPU)"
+        required: false
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       git_ref:
@@ -51,6 +56,11 @@ on:
         default: false
       skip_pr_test_health_check:
         description: "Skip PR test health check fast-fail (e.g. for release branch cuts)"
+        required: false
+        type: boolean
+        default: false
+      enable_upstream_full_ci:
+        description: "Enable upstream hardware outside the LangSlanger RunPod fleet (B200 and 8-GPU)"
         required: false
         type: boolean
         default: false
@@ -125,8 +135,9 @@ jobs:
       needs.check-changes.outputs.sgl_kernel == 'true'
     uses: ./.github/workflows/_pr-test-sgl-kernel-build.yml
     with:
-      runs_on: x64-kernel-build-node
+      runs_on: 1-gpu-h100
       job_display_name: Build Wheel
+      build_mode: native
       git_ref: ${{ inputs.git_ref || '' }}
       skip_pr_test_health_check: ${{ inputs.skip_pr_test_health_check == true }}
     secrets: inherit
@@ -188,7 +199,7 @@ jobs:
 
   extra-b-test-4-gpu-b200:
     needs: [check-changes, call-gate, sgl-kernel-build-wheels]
-    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
+    if: ${{ !failure() && !cancelled() && inputs.enable_upstream_full_ci == true && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: extra-b-test-4-gpu-b200
@@ -202,7 +213,7 @@ jobs:
 
   extra-b-test-8-gpu-h200:
     needs: [check-changes, call-gate, sgl-kernel-build-wheels]
-    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
+    if: ${{ !failure() && !cancelled() && inputs.enable_upstream_full_ci == true && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: extra-b-test-8-gpu-h200
@@ -228,7 +239,7 @@ jobs:
 
   extra-b-test-deepep-4-gpu-b200:
     needs: [check-changes, call-gate, sgl-kernel-build-wheels]
-    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
+    if: ${{ !failure() && !cancelled() && inputs.enable_upstream_full_ci == true && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: extra-b-test-deepep-4-gpu-b200
@@ -242,7 +253,7 @@ jobs:
 
   extra-b-test-deepep-8-gpu-h200:
     needs: [check-changes, call-gate, sgl-kernel-build-wheels]
-    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
+    if: ${{ !failure() && !cancelled() && inputs.enable_upstream_full_ci == true && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: extra-b-test-deepep-8-gpu-h200

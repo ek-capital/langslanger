@@ -26,6 +26,7 @@ from sglang.srt.mem_cache.common import (
     maybe_cache_unfinished_req,
     release_kv_cache,
 )
+from sglang.srt.observability.profile_scope import batch_bucket, record_profile_step
 from sglang.srt.runtime_context import get_server_args
 from sglang.srt.speculative.base_spec_worker import BaseSpecWorker
 from sglang.srt.state_capturer.indexer_topk import get_global_indexer_capturer
@@ -689,6 +690,7 @@ class SchedulerBatchResultProcessor:
             )
 
         self.token_to_kv_pool_allocator.free_group_begin()
+        committed_tokens_per_request = []
 
         for i, req in enumerate(batch.reqs):
             req: Req
@@ -698,6 +700,7 @@ class SchedulerBatchResultProcessor:
             ):
                 # NOTE: This (req.finished() or req.is_retracted) should only happen when overlap scheduling is enabled.
                 # And all the over-allocated tokens will be freed in `release_kv_cache`.
+                committed_tokens_per_request.append(0)
                 continue
 
             # next_token_id is a per-req list: 1 token for non-spec, the verified
@@ -707,6 +710,7 @@ class SchedulerBatchResultProcessor:
 
             req.output_ids.extend(next_token_id)
             new_accept_len = len(next_token_id)
+            committed_tokens_per_request.append(new_accept_len)
 
             self._maybe_update_reasoning_tokens(req, next_token_id)
             req.time_stats.set_last_decode_finish_time()
@@ -750,6 +754,16 @@ class SchedulerBatchResultProcessor:
 
         self.output_streamer.stream_output(batch.reqs, batch.return_logprob)
         self.token_to_kv_pool_allocator.free_group_end()
+
+        record_profile_step(
+            "scheduler_result",
+            scheduler_iteration=batch.forward_iter,
+            forward_mode=batch.forward_mode.name.lower(),
+            batch_size=batch.batch_size(),
+            batch_bucket=batch_bucket(batch.batch_size()),
+            committed_tokens=sum(committed_tokens_per_request),
+            committed_tokens_per_request=committed_tokens_per_request,
+        )
 
         self.metrics_reporter.forward_ct_decode = (
             self.metrics_reporter.forward_ct_decode + 1

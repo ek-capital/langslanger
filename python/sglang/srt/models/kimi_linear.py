@@ -47,6 +47,7 @@ from sglang.srt.model_loader.weight_utils import (
 from sglang.srt.models.deepseek_v2 import DeepseekV2AttentionMLA as KimiMLAAttention
 from sglang.srt.models.llama import LlamaMLP as KimiMLP
 from sglang.srt.models.transformers import maybe_prefix
+from sglang.srt.observability.profile_scope import profile_scope, record_profile_impl
 from sglang.srt.runtime_context import get_parallel, get_stream
 from sglang.srt.utils import make_layers
 from sglang.srt.utils.common import BumpAllocator, add_prefix, set_weight_attrs
@@ -130,6 +131,22 @@ class KimiMoE(nn.Module):
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
 
+        moe_parts = [self.experts, self.topk]
+        for attribute in ("quant_method", "runner", "dispatcher"):
+            value = getattr(self.experts, attribute, None)
+            if value is not None:
+                moe_parts.append(value)
+        record_profile_impl(
+            "model.moe",
+            "+".join(type(part).__name__ for part in moe_parts),
+            source_objects=tuple(type(part) for part in moe_parts),
+            conditions={
+                "layer": self.layer_idx,
+                "tp_size": self.tp_size,
+                "shared_experts": self.num_shared_experts or 0,
+            },
+        )
+
         shared_output = None
 
         if (
@@ -160,7 +177,20 @@ class KimiMoE(nn.Module):
             final_hidden_states = final_hidden_states + shared_output
 
         if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+            record_profile_impl(
+                "model.collective",
+                "tensor_model_parallel_all_reduce",
+                source_objects=(tensor_model_parallel_all_reduce,),
+                expected_symbols=("all_reduce", "nccl"),
+                loaded_modules=("torch",),
+                conditions={"layer": self.layer_idx, "tp_size": self.tp_size},
+            )
+            with profile_scope(
+                "model.collective", layer=self.layer_idx, collective="all_reduce"
+            ):
+                final_hidden_states = tensor_model_parallel_all_reduce(
+                    final_hidden_states
+                )
         return final_hidden_states.view(num_tokens, hidden_size)
 
 
@@ -423,8 +453,10 @@ class KimiDecoderLayer(nn.Module):
         self.alt_stream = alt_stream
 
         self.is_moe = config.is_moe
+        self.layer_idx = layer_idx
 
         if config.is_kda_layer(layer_idx):
+            self.attention_kind = "kda"
             self.self_attn = KimiDeltaAttention(
                 layer_idx=layer_idx,
                 hidden_size=config.hidden_size,
@@ -433,6 +465,7 @@ class KimiDecoderLayer(nn.Module):
                 prefix=f"{prefix}.self_attn",
             )
         else:
+            self.attention_kind = "mla"
             self.self_attn = KimiMLAAttention(
                 layer_id=layer_idx,
                 hidden_size=self.hidden_size,
@@ -462,6 +495,7 @@ class KimiDecoderLayer(nn.Module):
                 alt_stream=self.alt_stream,
             )
             self.mlp = self.block_sparse_moe
+            self.mlp_kind = "moe"
         else:
             self.mlp = KimiMLP(
                 hidden_size=self.hidden_size,
@@ -470,6 +504,7 @@ class KimiDecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
+            self.mlp_kind = "dense_mlp"
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
@@ -490,16 +525,33 @@ class KimiDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        hidden_states = self.self_attn(
-            hidden_states=hidden_states,
-            positions=positions,
-            forward_batch=forward_batch,
-            zero_allocator=zero_allocator,
+        attention_scope = f"model.attention.{self.attention_kind}"
+        record_profile_impl(
+            attention_scope,
+            type(self.self_attn).__name__,
+            source_objects=(type(self.self_attn),),
+            conditions={"layer": self.layer_idx},
         )
+        with profile_scope(attention_scope, layer=self.layer_idx):
+            hidden_states = self.self_attn(
+                hidden_states=hidden_states,
+                positions=positions,
+                forward_batch=forward_batch,
+                zero_allocator=zero_allocator,
+            )
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
+        mlp_scope = f"model.{self.mlp_kind}"
+        if self.mlp_kind == "dense_mlp":
+            record_profile_impl(
+                mlp_scope,
+                type(self.mlp).__name__,
+                source_objects=(type(self.mlp),),
+                conditions={"layer": self.layer_idx},
+            )
+        with profile_scope(mlp_scope, layer=self.layer_idx):
+            hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
 

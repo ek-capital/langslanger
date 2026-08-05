@@ -159,6 +159,12 @@ from sglang.srt.model_executor.runner import (
     EagerRunner,
     get_batch_sizes_to_capture,
 )
+from sglang.srt.observability.profile_scope import (
+    batch_bucket,
+    profile_forward_scope,
+    profile_scope,
+    record_profile_step,
+)
 from sglang.srt.platforms import current_platform
 from sglang.srt.runtime_context import get_server_args
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
@@ -196,13 +202,11 @@ from sglang.srt.utils import (
     slow_rank_detector,
 )
 from sglang.srt.utils.nvtx_pytorch_hooks import PytHooks
-from sglang.srt.utils.nvtx_utils import profile_range
 from sglang.srt.utils.offloader import (
     create_offloader_from_server_args,
     get_offloader,
     set_offloader,
 )
-from sglang.srt.utils.profile_utils import build_step_span_name
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 from sglang.srt.utils.weight_checker import WeightChecker
 
@@ -1251,8 +1255,22 @@ class ModelRunner:
             )
             self.msprobe_debugger.start(model=self.model, rank_id=rank_id)
 
-        # Step span
-        step_span_ctx = profile_range(build_step_span_name(forward_batch))
+        input_tokens = (
+            forward_batch.extend_num_tokens
+            if forward_batch.extend_num_tokens is not None
+            else forward_batch.batch_size
+        )
+        step_metadata = {
+            "model_forward_id": self.forward_pass_id,
+            "scheduler_iteration": forward_batch.scheduler_iteration,
+            "rank": self.ps.tp_rank,
+            "worker": "draft" if self.is_draft_worker else "target",
+            "forward_mode": forward_batch.forward_mode.name.lower(),
+            "batch_size": forward_batch.batch_size,
+            "batch_bucket": batch_bucket(forward_batch.batch_size),
+            "input_tokens": input_tokens,
+        }
+        record_profile_step("model_forward_start", **step_metadata)
 
         canary_ctx = (
             context_tuple(
@@ -1268,7 +1286,10 @@ class ModelRunner:
 
         with (
             canary_ctx,
-            step_span_ctx,
+            profile_scope("model.forward", **step_metadata),
+            profile_scope(
+                profile_forward_scope(forward_batch.forward_mode), **step_metadata
+            ),
             get_global_expert_distribution_recorder().with_forward_pass(
                 self.forward_pass_id,
                 forward_batch,
@@ -1288,6 +1309,9 @@ class ModelRunner:
                     reinit_attn_backend,
                     split_forward_count,
                 )
+        record_profile_step(
+            "model_forward_end", can_run_graph=output.can_run_graph, **step_metadata
+        )
         output.expert_distribution_metrics = recorder_outputs.get("metrics")
 
         no_copy_to_cpu = not self.server_args.disable_overlap_schedule

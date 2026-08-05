@@ -3,9 +3,11 @@ requires = ["setuptools>=61.0", "setuptools-rust>=1.10", "setuptools-scm>=8.0", 
 build-backend = "setuptools.build_meta"
 
 [project]
+# Keep the distribution name for dependency and import compatibility. The
+# LangSlanger product name is exposed through additive aliases below.
 name = "sglang"
 dynamic = ["version"]
-description = "SGLang is a fast serving framework for large language models and vision language models."
+description = "LangSlanger is an experimental, SGLang-compatible inference research fork."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
@@ -64,6 +66,7 @@ dependencies = [
   "pyzmq>=25.1.2",
   "quack-kernels>=0.6.1",
   "requests",
+  "safetensors",
   "scipy",
   "sentencepiece",
   "setproctitle",
@@ -182,12 +185,15 @@ st-attn = ["setuptools", "torch"]
 vsa = ["setuptools", "torch"]
 
 [project.urls]
-"Homepage" = "https://github.com/sgl-project/sglang"
-"Bug Tracker" = "https://github.com/sgl-project/sglang/issues"
+"Homepage" = "https://github.com/ek-capital/langslanger"
+"Bug Tracker" = "https://github.com/ek-capital/langslanger/issues"
+"Upstream" = "https://github.com/sgl-project/sglang"
 
 [project.scripts]
 sglang = "sglang.cli.main:main"
+langslanger = "langslanger.cli:main"
 killall_sglang = "sglang.cli.killall:main"
+killall_langslanger = "sglang.cli.killall:main"
 
 [tool.setuptools.package-data]
 "sglang" = [

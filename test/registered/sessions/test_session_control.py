@@ -609,7 +609,7 @@ class TestSessionControlVision(CustomTestCase):
         image_chunks = [
             "https://raw.githubusercontent.com/sgl-project/sglang/main/examples/assets/example_image.png",
             "https://raw.githubusercontent.com/sgl-project/sglang/main/examples/assets/example_image.png",
-            "https://raw.githubusercontent.com/sgl-project/sglang/main/assets/logo.png",
+            "https://raw.githubusercontent.com/ek-capital/langslanger/main/examples/assets/example_image.png",
         ]
 
         self.assertEqual(

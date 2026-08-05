@@ -31,7 +31,6 @@ exclude = [
   "^https://aflah02\\.substack\\.com/p/multi-node-llm-inference-with-sglang/?$",
 
   # Known noisy image URLs used in notebook-rendered examples.
-  "^https://github\\.com/sgl-project/sglang/blob/main/examples/assets/example_image\\.png\\?raw=true$",
-  "^https://raw\\.githubusercontent\\.com/sgl-project/sglang/main/examples/assets/example_image\\.png/?$",
-  "^https://raw\\.githubusercontent\\.com/sgl-project/sglang/main/assets/logo\\.png/?$",
+  "^https://github\\.com/ek-capital/langslanger/blob/main/examples/assets/example_image\\.png\\?raw=true$",
+  "^https://raw\\.githubusercontent\\.com/ek-capital/langslanger/main/examples/assets/example_image\\.png/?$",
 ]

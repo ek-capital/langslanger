@@ -699,11 +699,11 @@ COPY --from=local_src /src /tmp/local_src
 RUN if [ "$BRANCH_TYPE" = "local" ]; then \
         cp -r /tmp/local_src /sgl-workspace/sglang; \
     elif [ "$USE_LATEST_SGLANG" = "1" ]; then \
-        git clone --depth=1 https://github.com/sgl-project/sglang.git /sgl-workspace/sglang; \
+        git clone --depth=1 https://github.com/ek-capital/langslanger.git /sgl-workspace/sglang; \
     elif [ -z "$SGL_VERSION" ]; then \
         echo "ERROR: SGL_VERSION must be set when USE_LATEST_SGLANG=0 and BRANCH_TYPE!=local" && exit 1; \
     else \
-        git clone --depth=1 --branch v${SGL_VERSION} https://github.com/sgl-project/sglang.git /sgl-workspace/sglang; \
+        git clone --depth=1 --branch v${SGL_VERSION} https://github.com/ek-capital/langslanger.git /sgl-workspace/sglang; \
     fi \
     && rm -rf /tmp/local_src
 
@@ -765,14 +765,18 @@ WORKDIR /sgl-workspace/sglang
 # Keep build provenance at the end so metadata changes do not invalidate build layers.
 ARG SGLANG_BUILD_COMMIT=unknown
 ARG SGLANG_BUILD_URL=
-ARG SGLANG_IMAGE_TAG=local/sglang:dev
+ARG SGLANG_IMAGE_TAG=ghcr.io/ek-capital/langslanger:local
 ENV SGLANG_BUILD_COMMIT=${SGLANG_BUILD_COMMIT:-unknown} \
     SGLANG_BUILD_URL=${SGLANG_BUILD_URL:-} \
-    SGLANG_IMAGE_TAG=${SGLANG_IMAGE_TAG:-local/sglang:dev}
-LABEL org.opencontainers.image.source="https://github.com/sgl-project/sglang" \
+    SGLANG_IMAGE_TAG=${SGLANG_IMAGE_TAG:-ghcr.io/ek-capital/langslanger:local}
+LABEL org.opencontainers.image.title="LangSlanger" \
+      org.opencontainers.image.source="https://github.com/ek-capital/langslanger" \
       org.opencontainers.image.revision="${SGLANG_BUILD_COMMIT}" \
       org.opencontainers.image.version="${SGLANG_IMAGE_TAG}" \
       org.opencontainers.image.url="${SGLANG_BUILD_URL}" \
+      ai.langslanger.build.commit="${SGLANG_BUILD_COMMIT}" \
+      ai.langslanger.build.url="${SGLANG_BUILD_URL}" \
+      ai.langslanger.image.tag="${SGLANG_IMAGE_TAG}" \
       ai.sglang.build.commit="${SGLANG_BUILD_COMMIT}" \
       ai.sglang.build.url="${SGLANG_BUILD_URL}" \
       ai.sglang.image.tag="${SGLANG_IMAGE_TAG}"
@@ -918,14 +922,18 @@ WORKDIR /sgl-workspace/sglang
 # Keep build provenance at the end so metadata changes do not invalidate build layers.
 ARG SGLANG_BUILD_COMMIT=unknown
 ARG SGLANG_BUILD_URL=
-ARG SGLANG_IMAGE_TAG=local/sglang:dev
+ARG SGLANG_IMAGE_TAG=ghcr.io/ek-capital/langslanger:local
 ENV SGLANG_BUILD_COMMIT=${SGLANG_BUILD_COMMIT:-unknown} \
     SGLANG_BUILD_URL=${SGLANG_BUILD_URL:-} \
-    SGLANG_IMAGE_TAG=${SGLANG_IMAGE_TAG:-local/sglang:dev}
-LABEL org.opencontainers.image.source="https://github.com/sgl-project/sglang" \
+    SGLANG_IMAGE_TAG=${SGLANG_IMAGE_TAG:-ghcr.io/ek-capital/langslanger:local}
+LABEL org.opencontainers.image.title="LangSlanger" \
+      org.opencontainers.image.source="https://github.com/ek-capital/langslanger" \
       org.opencontainers.image.revision="${SGLANG_BUILD_COMMIT}" \
       org.opencontainers.image.version="${SGLANG_IMAGE_TAG}" \
       org.opencontainers.image.url="${SGLANG_BUILD_URL}" \
+      ai.langslanger.build.commit="${SGLANG_BUILD_COMMIT}" \
+      ai.langslanger.build.url="${SGLANG_BUILD_URL}" \
+      ai.langslanger.image.tag="${SGLANG_IMAGE_TAG}" \
       ai.sglang.build.commit="${SGLANG_BUILD_COMMIT}" \
       ai.sglang.build.url="${SGLANG_BUILD_URL}" \
       ai.sglang.image.tag="${SGLANG_IMAGE_TAG}"

@@ -1,6 +1,6 @@
 services:
   sglang:
-    image: lmsysorg/sglang:latest
+    image: ghcr.io/ek-capital/langslanger:nightly
     container_name: sglang
     volumes:
       - ${HOME}/.cache/huggingface:/root/.cache/huggingface

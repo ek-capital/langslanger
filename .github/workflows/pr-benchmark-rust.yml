@@ -64,7 +64,7 @@ jobs:
   benchmark:
     name: Benchmark - ${{ matrix.name }}
     if: |
-      github.repository == 'sgl-project/sglang' &&
+      github.repository == 'ek-capital/langslanger' &&
       (github.event_name == 'push' ||
        github.event_name == 'workflow_dispatch' ||
        (contains(github.event.pull_request.labels.*.name, 'router-benchmark') &&
@@ -151,7 +151,7 @@ jobs:
   benchmark-summary:
     name: Benchmark Summary
     needs: [benchmark]
-    if: always() && (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request')
+    if: always() && (github.repository == 'ek-capital/langslanger' || github.event_name == 'pull_request')
     runs-on: ubuntu-latest
     steps:
       - name: Download all benchmark results

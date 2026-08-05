@@ -55,8 +55,8 @@ except ImportError:
     requests = None  # Only needed for non-sort-only runs
 
 # Configuration
-REPO_OWNER = "sgl-project"
-REPO_NAME = "sglang"
+REPO_OWNER = "ek-capital"
+REPO_NAME = "langslanger"
 FILE_NAME = os.path.join(os.path.dirname(__file__), "CI_PERMISSIONS.json")
 HEADERS = {}
 

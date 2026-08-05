@@ -58,10 +58,11 @@ practical, and make future rebases or cherry-picks straightforward.
 
 ## SGLang drop-in compatibility
 
-Drop-in compatibility with the SGLang release identified in `README.md` is a
-hard repository invariant. Replacing an SGLang checkout, wheel, or container
-with LangSlanger must not require a user to rewrite an existing command,
-configuration file, Python import, deployment manifest, or API client.
+Drop-in compatibility with the exact SGLang release and commit identified in
+`UPSTREAM_BASE.json` is a hard repository invariant. Replacing an SGLang
+checkout, wheel, or container with LangSlanger must not require a user to
+rewrite an existing command, configuration file, Python import, deployment
+manifest, or API client.
 
 The product name is LangSlanger; the compatibility namespace remains SGLang.
 Agents MUST:
@@ -285,8 +286,6 @@ experimental workflows. Do not document flags, defaults, or behavior from
 memory; verify them against the checked-out code and the tested environment.
 
 More-specific `AGENTS.md` files override this file within their directory tree.
-In particular, follow `docs_new/AGENTS.md` for documentation-site work in the
-current stable tree.
 
 ## Safety and repository hygiene
 

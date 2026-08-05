@@ -1,7 +1,7 @@
 FROM ubuntu:24.04
 SHELL ["/bin/bash", "-c"]
 
-ARG SGLANG_REPO=https://github.com/sgl-project/sglang.git
+ARG SGLANG_REPO=https://github.com/ek-capital/langslanger.git
 ARG VER_SGLANG=main
 
 RUN apt-get update && \

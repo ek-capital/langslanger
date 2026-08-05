@@ -3,8 +3,9 @@ requires = ["setuptools>=61.0", "setuptools-rust>=1.10", "setuptools-scm>=8.0", 
 build-backend = "setuptools.build_meta"
 
 [project]
-# Keep the distribution name for dependency and import compatibility. The
-# LangSlanger product name is exposed through additive aliases below.
+# Keep the distribution name for dependency and import compatibility. This
+# repository is distributed as source and containers; do not publish this
+# project to PyPI. The LangSlanger product name is exposed through aliases.
 name = "sglang"
 dynamic = ["version"]
 description = "LangSlanger is an experimental, SGLang-compatible inference research fork."

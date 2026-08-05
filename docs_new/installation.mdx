@@ -1,0 +1,41 @@
+---
+title: "Installation"
+description: "Install LangSlanger from source or a fork-owned container image."
+---
+
+## Source installation
+
+LangSlanger does not publish a PyPI package. Install a pinned checkout in a
+dedicated environment:
+
+```bash
+git clone https://github.com/ek-capital/langslanger.git
+cd langslanger
+git checkout <commit>
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ./python
+```
+
+Record the checked-out commit in every benchmark artifact.
+
+## Container image
+
+The manual `Publish LangSlanger Image` workflow publishes images to:
+
+```text
+ghcr.io/ek-capital/langslanger
+```
+
+Use an immutable `sha-<commit>` tag for experiments. The moving `nightly` tag is
+for discovery, not reproducible results.
+
+## Launch
+
+The branded and compatibility commands use the same parser and runtime:
+
+```bash
+langslanger serve meta-llama/Llama-3.1-8B-Instruct --tp 2
+sglang serve meta-llama/Llama-3.1-8B-Instruct --tp 2
+```

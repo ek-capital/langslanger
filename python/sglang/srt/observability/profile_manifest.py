@@ -15,16 +15,17 @@ import platform
 import socket
 import subprocess
 import tempfile
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import torch
 
 from sglang.srt.distributed.parallel_state_wrapper import ParallelState
 from sglang.version import __version__ as sglang_version
 
-PROFILE_MANIFEST_SCHEMA_VERSION = 1
+PROFILE_MANIFEST_SCHEMA_VERSION = 2
 _SECRET_SUFFIXES = (
     "api_key",
     "password",
@@ -70,6 +71,13 @@ def write_profile_manifest(
     filename = f"{prefix}{profile_id}-{profile_rank_label(ps)}{suffix}.manifest.json"
     manifest_path = output_dir / filename
 
+    launch = _server_args(server_args)
+    software = _software()
+    hardware = _hardware(ps.gpu_id)
+    source = _source_checkout()
+    process = _process_identity(ps)
+    profiler = _jsonable(profiler_options)
+    parallel = _jsonable(dataclasses.asdict(ps))
     payload = {
         "schema_version": PROFILE_MANIFEST_SCHEMA_VERSION,
         "profile_id": profile_id,
@@ -79,14 +87,28 @@ def write_profile_manifest(
         "stopped_at": _format_utc(stopped_at_ns),
         "duration_ns": max(0, stopped_at_ns - started_at_ns),
         "activities": activities,
-        "profiler_options": _jsonable(profiler_options),
-        "parallel": _jsonable(dataclasses.asdict(ps)),
-        "launch": _server_args(server_args),
-        "software": _software(),
-        "hardware": _hardware(ps.gpu_id),
-        "source": _source_checkout(),
+        "profiler_options": profiler,
+        "parallel": parallel,
+        "process": process,
+        "launch": launch,
+        "software": software,
+        "hardware": hardware,
+        "runtime_environment": _runtime_environment(),
+        "source": source,
         "artifacts": _artifacts(output_dir, artifact_paths),
     }
+    payload["run_fingerprint"] = _run_fingerprint(
+        profile_id=profile_id,
+        stage=stage,
+        activities=activities,
+        profiler_options=profiler,
+        parallel=parallel,
+        process=process,
+        launch=launch,
+        software=software,
+        hardware=hardware,
+        source=source,
+    )
 
     fd, temporary_name = tempfile.mkstemp(
         dir=output_dir, prefix=f".{filename}.", suffix=".tmp"
@@ -141,15 +163,30 @@ def _software() -> dict[str, Any]:
         "pytorch": torch.__version__,
         "cuda_runtime": getattr(torch.version, "cuda", None),
         "hip_runtime": getattr(torch.version, "hip", None),
+        "nccl": _nccl_version(),
     }
 
 
 def _hardware(gpu_id: int) -> dict[str, Any]:
+    topology = _command_output(["nvidia-smi", "topo", "-m"])
     result: dict[str, Any] = {
         "hostname": socket.gethostname(),
         "platform": platform.platform(),
         "gpu_id": gpu_id,
         "driver_version": _nvidia_driver_version(),
+        "cpu_affinity": _cpu_affinity(),
+        "numa_nodes": _read_text("/sys/devices/system/node/online"),
+        "visible_devices": os.getenv("CUDA_VISIBLE_DEVICES"),
+        "accelerator_inventory": _nvidia_accelerator_inventory(),
+        "runtime_conditions": _nvidia_runtime_conditions(),
+        "topology": {
+            "nvidia_smi_topo_m": topology,
+            "sha256": (
+                hashlib.sha256(topology.encode("utf-8")).hexdigest()
+                if topology
+                else None
+            ),
+        },
     }
     if not torch.cuda.is_available():
         return result
@@ -168,26 +205,212 @@ def _hardware(gpu_id: int) -> dict[str, Any]:
     return result
 
 
-def _nvidia_driver_version() -> str | None:
+def _process_identity(ps: ParallelState) -> dict[str, Any]:
+    distributed = torch.distributed
+    initialized = distributed.is_available() and distributed.is_initialized()
+    trivial_world_size = 1 if _is_trivial_parallel_state(ps) else None
+    world_size = (
+        distributed.get_world_size()
+        if initialized
+        else _env_int("WORLD_SIZE", trivial_world_size)
+    )
+    global_rank = (
+        distributed.get_rank()
+        if initialized
+        else _env_int("RANK", 0 if world_size == 1 else None)
+    )
+    return {
+        "pid": os.getpid(),
+        "hostname": socket.gethostname(),
+        "global_rank": global_rank,
+        "local_rank": _env_int("LOCAL_RANK", ps.gpu_id),
+        "node_rank": _env_int(
+            "NODE_RANK", _env_int("GROUP_RANK", 0 if world_size == 1 else None)
+        ),
+        "world_size": world_size,
+    }
+
+
+def _is_trivial_parallel_state(ps: ParallelState) -> bool:
+    return all(
+        size == 1
+        for size in (
+            ps.tp_size,
+            ps.pp_size,
+            ps.dp_size,
+            ps.attn_tp_size,
+            ps.attn_cp_size,
+            ps.attn_dp_size,
+            ps.moe_ep_size,
+            ps.moe_dp_size,
+            ps.dcp_size,
+        )
+    )
+
+
+def _run_fingerprint(
+    *,
+    profile_id: str,
+    stage: str | None,
+    activities: list[str],
+    profiler_options: dict[str, Any],
+    parallel: dict[str, Any],
+    process: dict[str, Any],
+    launch: dict[str, Any],
+    software: dict[str, Any],
+    hardware: dict[str, Any],
+    source: dict[str, Any],
+) -> str:
+    """Identify rank-independent deployment inputs for one profile run."""
+    rank_independent_parallel = {
+        key: value
+        for key, value in parallel.items()
+        if not key.endswith("_rank") and key != "gpu_id"
+    }
+    identity = {
+        "profile_id": profile_id,
+        "stage": stage,
+        "activities": activities,
+        "profiler_options": profiler_options,
+        "parallel_sizes": rank_independent_parallel,
+        "world_size": process.get("world_size"),
+        "launch": {
+            key: value
+            for key, value in launch.items()
+            if not key.endswith("_rank") and key not in {"base_gpu_id", "gpu_id"}
+        },
+        "software": software,
+        "hardware_platform": hardware.get("platform"),
+        "accelerator_inventory": [
+            {
+                key: value
+                for key, value in accelerator.items()
+                if key not in {"index", "uuid", "pci.bus_id"}
+            }
+            for accelerator in hardware.get("accelerator_inventory", [])
+        ],
+        "topology_sha256": (hardware.get("topology") or {}).get("sha256"),
+        "source": source,
+    }
+    encoded = json.dumps(identity, separators=(",", ":"), sort_keys=True).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _runtime_environment() -> dict[str, str]:
+    allowed_names = {
+        "CUDA_DEVICE_ORDER",
+        "CUDA_VISIBLE_DEVICES",
+        "NVIDIA_VISIBLE_DEVICES",
+        "OMP_NUM_THREADS",
+        "ROCR_VISIBLE_DEVICES",
+    }
+    allowed_prefixes = ("NCCL_", "NVSHMEM_", "SGLANG_DEEPEP_")
+    return {
+        key: value
+        for key, value in sorted(os.environ.items())
+        if (key in allowed_names or key.startswith(allowed_prefixes))
+        and not _is_secret_field(key)
+    }
+
+
+def _nccl_version() -> str | None:
+    try:
+        version = torch.cuda.nccl.version()
+    except (AssertionError, AttributeError, RuntimeError):
+        return None
+    if isinstance(version, tuple):
+        return ".".join(str(part) for part in version)
+    return str(version)
+
+
+def _nvidia_accelerator_inventory() -> list[dict[str, str]]:
+    fields = ("index", "uuid", "pci.bus_id", "name", "memory.total", "compute_cap")
+    output = _command_output(
+        [
+            "nvidia-smi",
+            "--query-gpu=" + ",".join(fields),
+            "--format=csv,noheader,nounits",
+        ]
+    )
+    if not output:
+        return []
+    return _parse_csv_rows(output, fields)
+
+
+def _nvidia_runtime_conditions() -> list[dict[str, str]]:
+    fields = ("index", "pstate", "power.limit", "clocks.current.sm")
+    output = _command_output(
+        [
+            "nvidia-smi",
+            "--query-gpu=" + ",".join(fields),
+            "--format=csv,noheader,nounits",
+        ]
+    )
+    if not output:
+        return []
+    return _parse_csv_rows(output, fields)
+
+
+def _parse_csv_rows(output: str, fields: tuple[str, ...]) -> list[dict[str, str]]:
+    rows = []
+    for line in output.splitlines():
+        values = [value.strip() for value in line.split(",")]
+        if len(values) != len(fields):
+            continue
+        rows.append(dict(zip(fields, values, strict=True)))
+    return rows
+
+
+def _cpu_affinity() -> list[int] | None:
+    try:
+        return sorted(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        return None
+
+
+def _read_text(path: str) -> str | None:
+    try:
+        return Path(path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+
+
+def _env_int(name: str, default: int | None = None) -> int | None:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def _command_output(command: list[str]) -> str | None:
     try:
         result = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=driver_version",
-                "--format=csv,noheader,nounits",
-            ],
+            command,
             capture_output=True,
             check=False,
             text=True,
             timeout=5,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired):
         return None
-    if result.returncode != 0:
-        return None
-    versions = sorted(
-        {line.strip() for line in result.stdout.splitlines() if line.strip()}
+    output = result.stdout.strip()
+    return output if result.returncode == 0 and output else None
+
+
+def _nvidia_driver_version() -> str | None:
+    output = _command_output(
+        [
+            "nvidia-smi",
+            "--query-gpu=driver_version",
+            "--format=csv,noheader,nounits",
+        ]
     )
+    if not output:
+        return None
+    versions = sorted({line.strip() for line in output.splitlines() if line.strip()})
     return ",".join(versions) or None
 
 

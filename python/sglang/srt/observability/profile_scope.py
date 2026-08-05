@@ -11,7 +11,7 @@ import subprocess
 import sys
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
@@ -21,7 +21,7 @@ from sglang.srt.distributed.parallel_state_wrapper import ParallelState
 from sglang.srt.observability.profile_manifest import profile_rank_label
 from sglang.srt.utils.nvtx_utils import profile_range
 
-PROFILE_STEP_SCHEMA_VERSION = 1
+PROFILE_STEP_SCHEMA_VERSION = 2
 _LOCK = threading.Lock()
 _RECORDER: _ProfileStepRecorder | None = None
 
@@ -48,17 +48,12 @@ class _ProfileStepRecorder:
         self._lock = threading.Lock()
         self._closed = False
         self._once_keys: set[str] = set()
-        self.write(
-            {
-                "event": "clock_sync",
-                "schema_version": PROFILE_STEP_SCHEMA_VERSION,
-                "profile_id": profile_id,
-                "rank_label": profile_rank_label(ps),
-                "stage": stage,
-                "wall_time_ns": time.time_ns(),
-                "monotonic_time_ns": time.perf_counter_ns(),
-            }
-        )
+        self._profile_id = profile_id
+        self._rank_label = profile_rank_label(ps)
+        self._stage = stage
+        self._clock_sync_sequence = 0
+        self._collective_sequences: dict[str, int] = {}
+        self._scope_local = threading.local()
 
     def write(self, record: dict[str, Any]) -> None:
         with self._lock:
@@ -80,6 +75,54 @@ class _ProfileStepRecorder:
                 return False
             self._once_keys.add(key)
             return True
+
+    def next_clock_sync_sequence(self) -> int:
+        with self._lock:
+            self._clock_sync_sequence += 1
+            return self._clock_sync_sequence
+
+    def collective_metadata(
+        self, name: str, metadata: dict[str, Any]
+    ) -> dict[str, Any]:
+        if name != "model.collective":
+            return metadata
+        group = str(metadata.get("group_name") or metadata.get("backend") or "model")
+        with self._lock:
+            sequence = self._collective_sequences.get(group, 0) + 1
+            self._collective_sequences[group] = sequence
+        parent_metadata = {}
+        for _, parent in reversed(getattr(self._scope_local, "stack", [])):
+            if parent.get("scheduler_iteration") is None:
+                continue
+            parent_metadata = {
+                key: parent.get(key)
+                for key in (
+                    "scheduler_iteration",
+                    "model_forward_id",
+                    "worker",
+                    "forward_mode",
+                    "batch_size",
+                    "batch_bucket",
+                )
+            }
+            break
+        return {
+            **parent_metadata,
+            **metadata,
+            "collective_group": group,
+            "collective_sequence": sequence,
+            "collective_id": f"{group}:{sequence}",
+        }
+
+    def push_scope(self, name: str, metadata: dict[str, Any]) -> None:
+        stack = getattr(self._scope_local, "stack", None)
+        if stack is None:
+            stack = []
+            self._scope_local.stack = stack
+        stack.append((name, metadata))
+
+    def pop_scope(self) -> None:
+        self._scope_local.stack.pop()
 
     def _write_unlocked(self, record: dict[str, Any]) -> None:
         if self._closed:
@@ -114,6 +157,7 @@ def start_profile_recording(
             stage=stage,
             ps=ps,
         )
+    record_profile_clock_sync()
 
 
 def stop_profile_recording() -> Path | None:
@@ -130,6 +174,59 @@ def record_profile_step(event: str, **metadata: Any) -> None:
     if recorder is None:
         return
     recorder.write({"event": event, **_jsonable_metadata(metadata)})
+
+
+def record_profile_clock_sync() -> None:
+    """Pair the trace clock with the host monotonic clock without device sync."""
+    recorder = _RECORDER
+    if recorder is None:
+        return
+    monotonic_before_ns = time.perf_counter_ns()
+    wall_before_ns = time.time_ns()
+    with profile_range("profile.clock_sync"):
+        pass
+    wall_after_ns = time.time_ns()
+    monotonic_after_ns = time.perf_counter_ns()
+    recorder.write(
+        {
+            "event": "clock_sync",
+            "schema_version": PROFILE_STEP_SCHEMA_VERSION,
+            "profile_id": recorder._profile_id,
+            "rank_label": recorder._rank_label,
+            "stage": recorder._stage,
+            "sequence": recorder.next_clock_sync_sequence(),
+            "monotonic_before_ns": monotonic_before_ns,
+            "monotonic_after_ns": monotonic_after_ns,
+            "wall_before_ns": wall_before_ns,
+            "wall_after_ns": wall_after_ns,
+            "uncertainty_ns": monotonic_after_ns - monotonic_before_ns,
+        }
+    )
+
+
+def profile_collective_scope(
+    operation: str,
+    *,
+    group_name: str,
+    group_ranks: list[int],
+    rank_in_group: int,
+    inputs: tuple[Any, ...] = (),
+    outputs: tuple[Any, ...] = (),
+    backend: str = "group_coordinator",
+):
+    """Record one logical collective without touching tensors when disabled."""
+    if _RECORDER is None:
+        return nullcontext()
+    return profile_scope(
+        "model.collective",
+        operation=operation,
+        backend=backend,
+        group_name=group_name,
+        group_ranks=group_ranks,
+        rank_in_group=rank_in_group,
+        input_bytes=sum(_tensor_nbytes(value) for value in inputs),
+        output_bytes=sum(_tensor_nbytes(value) for value in outputs),
+    )
 
 
 def record_profile_impl(
@@ -210,6 +307,7 @@ def profile_scope(name: str, **metadata: Any):
     recorder = _RECORDER
     if recorder is None:
         return profile_range(name)
+    metadata = recorder.collective_metadata(name, metadata)
     return _profile_scope_recorded(recorder, name, metadata)
 
 
@@ -220,10 +318,12 @@ def _profile_scope_recorded(
     recorder.write(
         {"event": "scope_start", "scope": name, **_jsonable_metadata(metadata)}
     )
+    recorder.push_scope(name, metadata)
     try:
         with profile_range(name):
             yield
     finally:
+        recorder.pop_scope()
         recorder.write(
             {"event": "scope_end", "scope": name, **_jsonable_metadata(metadata)}
         )
@@ -265,6 +365,22 @@ def _jsonable_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
                 f"profile metadata {key!r} must already be host-resident JSON data"
             )
     return result
+
+
+def _tensor_nbytes(value: Any) -> int:
+    """Read shape metadata only; never inspect values or synchronize a device."""
+    if isinstance(value, (list, tuple)):
+        return sum(_tensor_nbytes(item) for item in value)
+    numel = getattr(value, "numel", None)
+    element_size = getattr(value, "element_size", None)
+    if not callable(numel) or not callable(element_size):
+        return 0
+    try:
+        return int(numel()) * int(element_size())
+    except (TypeError, ValueError):
+        # Symbolic sizes can exist while a graph is being captured. Profiling
+        # should lose a byte estimate rather than perturb compilation.
+        return 0
 
 
 def _provenance_for_object(obj: Any) -> dict[str, Any] | None:

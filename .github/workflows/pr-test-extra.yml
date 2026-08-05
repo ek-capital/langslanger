@@ -3,23 +3,14 @@ name: PR Test Extra
 #
 # Adds runtime to a PR only when the author asks for it: the PR must carry
 # BOTH `run-ci` (basic-CI prerequisite) and `run-ci-extra` (explicit opt-in
-# to this workflow). The label check happens at runtime in pr-gate.yml via
-# live `gh pr view --json labels`, so reruns after adding the labels via
-# slash command pick up the new label set (workflow-level `if` checks would
-# read the frozen event payload, which never updates on rerun). The same
-# job graph runs unconditionally on workflow_dispatch / workflow_call so it
-# can be triggered manually or chained from another workflow.
+# to this workflow). The shared gate skips cleanly until those labels are in
+# the pull-request event. langslanger-pr-hardware.yml owns PR dispatch, while
+# workflow_dispatch / workflow_call remain explicit bypasses.
 #
 # Stages: extra-a (1-/2-gpu) and extra-b (4-/8-gpu) caller stubs reuse
 # `_pr-test-stage.yml` and `_pr-test-check-changes.yml` from pr-test.yml.
 
 on:
-  pull_request:
-    # `labeled` lets the workflow re-fire when `run-ci-extra` (or `run-ci`)
-    # is added after the latest push — otherwise GHA leaves the stale
-    # skipped run in place and there's no way to enable extra without
-    # another push. See check-changes.if below for the matching guard.
-    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
     inputs:
       force_continue_on_error:
@@ -37,6 +28,11 @@ on:
         required: false
         type: boolean
         default: false
+      enable_upstream_full_ci:
+        description: "Enable upstream hardware outside the LangSlanger RunPod fleet (B200 and 8-GPU)"
+        required: false
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       git_ref:
@@ -51,6 +47,11 @@ on:
         default: false
       skip_pr_test_health_check:
         description: "Skip PR test health check fast-fail (e.g. for release branch cuts)"
+        required: false
+        type: boolean
+        default: false
+      enable_upstream_full_ci:
+        description: "Enable upstream hardware outside the LangSlanger RunPod fleet (B200 and 8-GPU)"
         required: false
         type: boolean
         default: false
@@ -76,14 +77,9 @@ permissions:
 
 jobs:
   # =============================================== check changes ====================================================
-  # The actual `run-ci` + `run-ci-extra` label gate now lives in the
-  # `call-gate` job below, which calls pr-gate.yml. pr-gate.yml live-fetches
-  # the PR's current labels at runtime, so a rerun (e.g. via
-  # /tag-and-rerun-ci extra, which adds labels via GITHUB_TOKEN — these
-  # don't cascade-trigger labeled events) picks up the new label set and
-  # passes. The previous workflow-level `if` checked the frozen event
-  # payload, which never updates on rerun and made the slash-add-label flow
-  # impossible to recover.
+# The actual `run-ci` + `run-ci-extra` label gate lives in the `call-gate`
+# job below. Drafts and missing labels produce a skipped gate, not a failed
+# check; adding either gating label creates a fresh event with current labels.
   #
   # We only keep one filter here: for `labeled` events, only proceed if the
   # just-added label is one of the gating labels. This prevents every
@@ -103,13 +99,22 @@ jobs:
     secrets: inherit
 
   # =============================================== PR Gate ====================================================
-  # Runtime live-fetch gate. Mirrors pr-test.yml's call-gate, but additionally
-  # requires `run-ci-extra`. Failure here cascades down to every test job
-  # via `needs`, so the workflow ends with one red gate job (~30s) plus a
-  # row of skipped test jobs instead of consuming a runner.
+  # The shared gate skips drafts and PRs without both opt-in labels. Hardware
+  # jobs require a successful gate on PR events, so skipped gates stay cheap and
+  # green instead of dispatching a runner or producing a false-red failure.
   call-gate:
     needs: check-changes
-    if: github.event_name != 'schedule' && needs.check-changes.result == 'success'
+    if: |
+      github.event_name != 'schedule' &&
+      needs.check-changes.result == 'success' &&
+      (
+        github.event_name != 'pull_request' ||
+        (
+          github.event.pull_request.draft == false &&
+          contains(github.event.pull_request.labels.*.name, 'run-ci') &&
+          contains(github.event.pull_request.labels.*.name, 'run-ci-extra')
+        )
+      )
     uses: ./.github/workflows/pr-gate.yml
     with:
       require-run-ci: true
@@ -121,39 +126,21 @@ jobs:
     needs: [check-changes, call-gate]
     if: |
       needs.check-changes.result == 'success' &&
-      (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') &&
+      (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) &&
       needs.check-changes.outputs.sgl_kernel == 'true'
     uses: ./.github/workflows/_pr-test-sgl-kernel-build.yml
     with:
-      runs_on: x64-kernel-build-node
+      runs_on: 1-gpu-h100
       job_display_name: Build Wheel
-      git_ref: ${{ inputs.git_ref || '' }}
-      skip_pr_test_health_check: ${{ inputs.skip_pr_test_health_check == true }}
-    secrets: inherit
-
-  # =============================================== Rust extensions ====================================================
-
-  # Own build job because artifacts are per-run: a standalone `run-ci-extra` run
-  # cannot reach the base run's. Only artifact_name is suffixed; the cache prefix
-  # stays at the default so the two workflows share one cache entry.
-  rust-ext-build:
-    needs: [check-changes, call-gate]
-    if: |
-      !cancelled() &&
-      needs.check-changes.result == 'success' &&
-      (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped')
-    uses: ./.github/workflows/_pr-test-rust-ext-build.yml
-    with:
-      runs_on: 1-gpu-5090
-      artifact_name: rust-ext-x86_64-extra
+      build_mode: native
       git_ref: ${{ inputs.git_ref || '' }}
       skip_pr_test_health_check: ${{ inputs.skip_pr_test_health_check == true }}
     secrets: inherit
 
   # =============================================== extra-a (1-/2-gpu) ===============================================
   extra-a-test-1-gpu-small:
-    needs: [check-changes, call-gate, sgl-kernel-build-wheels, rust-ext-build]
-    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
+    needs: [check-changes, call-gate, sgl-kernel-build-wheels]
+    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: extra-a-test-1-gpu-small
@@ -162,12 +149,11 @@ jobs:
       caller_inputs: ${{ toJson(inputs) }}
       partitions: ${{ needs.check-changes.outputs.partitions }}
       run_timeout_minutes: '60'
-      rust_ext_artifact: ${{ needs.rust-ext-build.outputs.artifact_name }}
     secrets: inherit
 
   extra-a-test-1-gpu-large:
-    needs: [check-changes, call-gate, sgl-kernel-build-wheels, rust-ext-build]
-    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
+    needs: [check-changes, call-gate, sgl-kernel-build-wheels]
+    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: extra-a-test-1-gpu-large
@@ -177,12 +163,11 @@ jobs:
       partitions: ${{ needs.check-changes.outputs.partitions }}
       run_timeout_minutes: '60'
       timeout_per_file: '1800'
-      rust_ext_artifact: ${{ needs.rust-ext-build.outputs.artifact_name }}
     secrets: inherit
 
   extra-a-test-2-gpu-large:
-    needs: [check-changes, call-gate, sgl-kernel-build-wheels, rust-ext-build]
-    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
+    needs: [check-changes, call-gate, sgl-kernel-build-wheels]
+    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: extra-a-test-2-gpu-large
@@ -191,13 +176,12 @@ jobs:
       caller_inputs: ${{ toJson(inputs) }}
       partitions: ${{ needs.check-changes.outputs.partitions }}
       run_timeout_minutes: '60'
-      rust_ext_artifact: ${{ needs.rust-ext-build.outputs.artifact_name }}
     secrets: inherit
 
   # =============================================== extra-b (4-/8-gpu) ===============================================
   extra-b-test-4-gpu-h100:
-    needs: [check-changes, call-gate, sgl-kernel-build-wheels, rust-ext-build]
-    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
+    needs: [check-changes, call-gate, sgl-kernel-build-wheels]
+    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: extra-b-test-4-gpu-h100
@@ -206,12 +190,11 @@ jobs:
       caller_inputs: ${{ toJson(inputs) }}
       partitions: ${{ needs.check-changes.outputs.partitions }}
       run_timeout_minutes: '60'
-      rust_ext_artifact: ${{ needs.rust-ext-build.outputs.artifact_name }}
     secrets: inherit
 
   extra-b-test-4-gpu-b200:
-    needs: [check-changes, call-gate, sgl-kernel-build-wheels, rust-ext-build]
-    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
+    needs: [check-changes, call-gate, sgl-kernel-build-wheels]
+    if: ${{ !failure() && !cancelled() && inputs.enable_upstream_full_ci == true && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: extra-b-test-4-gpu-b200
@@ -221,12 +204,11 @@ jobs:
       partitions: ${{ needs.check-changes.outputs.partitions }}
       run_timeout_minutes: '60'
       timeout_per_file: '1800'
-      rust_ext_artifact: ${{ needs.rust-ext-build.outputs.artifact_name }}
     secrets: inherit
 
   extra-b-test-8-gpu-h200:
-    needs: [check-changes, call-gate, sgl-kernel-build-wheels, rust-ext-build]
-    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
+    needs: [check-changes, call-gate, sgl-kernel-build-wheels]
+    if: ${{ !failure() && !cancelled() && inputs.enable_upstream_full_ci == true && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: extra-b-test-8-gpu-h200
@@ -235,12 +217,11 @@ jobs:
       caller_inputs: ${{ toJson(inputs) }}
       partitions: ${{ needs.check-changes.outputs.partitions }}
       run_timeout_minutes: '60'
-      rust_ext_artifact: ${{ needs.rust-ext-build.outputs.artifact_name }}
     secrets: inherit
 
   extra-b-test-deepep-4-gpu-h100:
-    needs: [check-changes, call-gate, sgl-kernel-build-wheels, rust-ext-build]
-    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
+    needs: [check-changes, call-gate, sgl-kernel-build-wheels]
+    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: extra-b-test-deepep-4-gpu-h100
@@ -249,12 +230,11 @@ jobs:
       caller_inputs: ${{ toJson(inputs) }}
       partitions: ${{ needs.check-changes.outputs.partitions }}
       run_timeout_minutes: '60'
-      rust_ext_artifact: ${{ needs.rust-ext-build.outputs.artifact_name }}
     secrets: inherit
 
   extra-b-test-deepep-4-gpu-b200:
-    needs: [check-changes, call-gate, sgl-kernel-build-wheels, rust-ext-build]
-    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
+    needs: [check-changes, call-gate, sgl-kernel-build-wheels]
+    if: ${{ !failure() && !cancelled() && inputs.enable_upstream_full_ci == true && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: extra-b-test-deepep-4-gpu-b200
@@ -264,12 +244,11 @@ jobs:
       partitions: ${{ needs.check-changes.outputs.partitions }}
       run_timeout_minutes: '60'
       timeout_per_file: '1800'
-      rust_ext_artifact: ${{ needs.rust-ext-build.outputs.artifact_name }}
     secrets: inherit
 
   extra-b-test-deepep-8-gpu-h200:
-    needs: [check-changes, call-gate, sgl-kernel-build-wheels, rust-ext-build]
-    if: ${{ !failure() && !cancelled() && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped') }}
+    needs: [check-changes, call-gate, sgl-kernel-build-wheels]
+    if: ${{ !failure() && !cancelled() && inputs.enable_upstream_full_ci == true && needs.check-changes.result == 'success' && (needs.call-gate.result == 'success' || (github.event_name != 'pull_request' && needs.call-gate.result == 'skipped')) }}
     uses: ./.github/workflows/_pr-test-stage.yml
     with:
       self_name: extra-b-test-deepep-8-gpu-h200
@@ -278,7 +257,6 @@ jobs:
       caller_inputs: ${{ toJson(inputs) }}
       partitions: ${{ needs.check-changes.outputs.partitions }}
       run_timeout_minutes: '60'
-      rust_ext_artifact: ${{ needs.rust-ext-build.outputs.artifact_name }}
     secrets: inherit
 
   # =============================================== aggregator ====================================================
@@ -291,7 +269,6 @@ jobs:
         check-changes,
         call-gate,
         sgl-kernel-build-wheels,
-        rust-ext-build,
         extra-a-test-1-gpu-small,
         extra-a-test-1-gpu-large,
         extra-a-test-2-gpu-large,

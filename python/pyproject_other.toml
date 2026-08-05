@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sglang"
 dynamic = ["version"]
-description = "SGLang is a fast serving framework for large language models and vision language models."
+description = "LangSlanger is an experimental, SGLang-compatible inference research fork."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
@@ -188,11 +188,13 @@ dev_musa = ["sglang[all_musa]", "sglang[test]"]
 dev_mps = ["sglang[all_mps]", "sglang[test]"]
 
 [project.urls]
-"Homepage" = "https://github.com/sgl-project/sglang"
-"Bug Tracker" = "https://github.com/sgl-project/sglang/issues"
+"Homepage" = "https://github.com/ek-capital/langslanger"
+"Bug Tracker" = "https://github.com/ek-capital/langslanger/issues"
+"Upstream" = "https://github.com/sgl-project/sglang"
 
 [project.scripts]
 sglang = "sglang.cli.main:main"
+langslanger = "langslanger.cli:main"
 
 # Rust extension modules are auto-discovered by setup.py from the cargo
 # workspace in ../rust; this allowlist restricts which of them this platform

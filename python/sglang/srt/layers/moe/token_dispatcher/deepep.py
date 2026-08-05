@@ -28,7 +28,7 @@ from sglang.srt.layers.moe.utils import (
     is_tbo_enabled,
 )
 from sglang.srt.observability.profile_scope import (
-    profile_scope,
+    profile_collective_scope,
     record_profile_impl,
 )
 from sglang.srt.utils import (
@@ -418,6 +418,16 @@ class _DeepEPDispatcherImplBase:
     def _get_buffer(self):
         raise NotImplementedError
 
+    def _profile_collective(self, operation: str, *inputs):
+        return profile_collective_scope(
+            operation,
+            group_name=getattr(self.group, "unique_name", "deep_ep"),
+            group_ranks=list(getattr(self.group, "ranks", [])),
+            rank_in_group=int(getattr(self.group, "rank_in_group", -1)),
+            inputs=inputs,
+            backend="deep_ep",
+        )
+
     def set_quant_config(self, quant_config: dict) -> None:
         self.quant_config = quant_config
         self.set_deepep_dispatcher_dtype()
@@ -563,9 +573,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             loaded_modules=("deep_ep",),
             conditions={"operation": "moe_dispatch", "mode": "normal"},
         )
-        with profile_scope(
-            "model.collective", operation="moe_dispatch", backend="deep_ep"
-        ):
+        with self._profile_collective("moe_dispatch", x, topk_ids, topk_weights):
             (
                 num_tokens_per_rank,
                 num_tokens_per_rdma_rank,
@@ -653,9 +661,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             loaded_modules=("deep_ep",),
             conditions={"operation": "moe_combine", "mode": "normal"},
         )
-        with profile_scope(
-            "model.collective", operation="moe_combine", backend="deep_ep"
-        ):
+        with self._profile_collective("moe_combine", x):
             _deepep_precompile_tp_barrier()
             combined_x, _, event = buffer.combine(
                 x,
@@ -781,8 +787,8 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
             loaded_modules=("deep_ep",),
             conditions={"operation": "moe_dispatch", "mode": "low_latency"},
         )
-        with profile_scope(
-            "model.collective", operation="moe_dispatch", backend="deep_ep"
+        with self._profile_collective(
+            "moe_dispatch", hidden_states, topk_ids, topk_weights
         ):
             _deepep_precompile_tp_barrier()
             packed_recv_hidden, self.packed_recv_count, self.handle, event, hook = (
@@ -876,8 +882,8 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
             loaded_modules=("deep_ep",),
             conditions={"operation": "moe_combine", "mode": "low_latency"},
         )
-        with profile_scope(
-            "model.collective", operation="moe_combine", backend="deep_ep"
+        with self._profile_collective(
+            "moe_combine", hidden_states, topk_ids, topk_weights
         ):
             with ctx:
                 _deepep_precompile_tp_barrier()

@@ -28,6 +28,10 @@ on:
         description: 'Forwarded from the caller workflow input of the same name. Not consumed inside this reusable workflow today, but mirrored so the resulting env context matches the inline-job baseline.'
         type: boolean
         default: false
+      build_mode:
+        description: "Build backend: docker for upstream runners, native for a CUDA-equipped RunPod runner"
+        type: string
+        default: docker
 
 # Mirror the caller workflow's top-level env block. GitHub Actions does NOT
 # automatically inherit workflow-level env vars across the workflow_call
@@ -55,6 +59,15 @@ jobs:
             cuda-version: "13.0"
     name: ${{ inputs.job_display_name }}
     steps:
+      - name: Validate build mode
+        env:
+          BUILD_MODE: ${{ inputs.build_mode }}
+        run: |
+          case "$BUILD_MODE" in
+            docker|native) ;;
+            *) echo "Unsupported build mode: $BUILD_MODE" >&2; exit 1 ;;
+          esac
+
       - name: Cleanup
         run: |
           if [ -d "$GITHUB_WORKSPACE" ]; then
@@ -76,6 +89,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Free Docker disk space
+        if: inputs.build_mode == 'docker'
         run: |
           set -x
           # `-f` only (no `-a`): drops dangling <none>:<none> layers from
@@ -99,11 +113,16 @@ jobs:
           df -h /
 
       - name: Build wheel for Python ${{ matrix.python-version }} and CUDA ${{ matrix.cuda-version }}
+        if: inputs.build_mode == 'docker'
         run: |
           cd python/sglang/kernels/aot
           ./build.sh "${{ matrix.python-version }}" "${{ matrix.cuda-version }}"
         env:
           USE_CCACHE: 1
+
+      - name: Build wheel natively on RunPod
+        if: inputs.build_mode == 'native'
+        run: bash scripts/ci/runpod/build_sgl_kernel_wheel.sh
 
       - name: Verify wheel artifacts
         run: |

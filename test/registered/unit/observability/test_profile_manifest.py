@@ -67,12 +67,16 @@ class TestProfileManifest(unittest.TestCase):
             )
 
             manifest = json.loads(manifest_path.read_text())
-            self.assertEqual(manifest["schema_version"], 1)
+            self.assertEqual(manifest["schema_version"], 2)
             self.assertEqual(manifest["profile_id"], "run")
             self.assertEqual(manifest["duration_ns"], 1_000_000_000)
             self.assertEqual(manifest["launch"]["api_key"], "<redacted>")
             self.assertEqual(manifest["launch"]["max_total_tokens"], 1024)
             self.assertEqual(manifest["launch"]["extra"], "config.json")
+            self.assertEqual(manifest["process"]["local_rank"], 0)
+            self.assertEqual(manifest["process"]["global_rank"], 0)
+            self.assertEqual(manifest["process"]["world_size"], 1)
+            self.assertEqual(len(manifest["run_fingerprint"]), 64)
             self.assertEqual(
                 manifest["artifacts"],
                 [
@@ -84,6 +88,23 @@ class TestProfileManifest(unittest.TestCase):
                 ],
             )
             self.assertEqual(list(output_dir.glob("*.tmp")), [])
+
+    @patch.dict(
+        "os.environ",
+        {
+            "NCCL_DEBUG": "INFO",
+            "NCCL_AUTH_TOKEN": "do-not-write",
+            "CUDA_VISIBLE_DEVICES": "0,1",
+        },
+        clear=True,
+    )
+    def test_records_only_safe_runtime_environment(self):
+        from sglang.srt.observability.profile_manifest import _runtime_environment
+
+        self.assertEqual(
+            _runtime_environment(),
+            {"CUDA_VISIBLE_DEVICES": "0,1", "NCCL_DEBUG": "INFO"},
+        )
 
 
 if __name__ == "__main__":

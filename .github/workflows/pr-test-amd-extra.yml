@@ -3,12 +3,9 @@ name: PR Test Extra (AMD)
 #
 # Adds AMD runtime to a PR only when the author opts in: the PR must carry
 # BOTH `run-ci` (basic-CI prerequisite) and `run-ci-extra` (explicit opt-in).
-# The label check happens at runtime in pr-gate.yml via a live
-# `gh pr view`-style fetch, so reruns after adding the labels (e.g. via a
-# slash command) pick up the new label set — a workflow-level `if` would read
-# the frozen event payload, which never updates on rerun. The job graph also
-# runs unconditionally on workflow_dispatch / workflow_call so it can be
-# triggered manually or chained from the AMD scheduler.
+# The shared gate skips cleanly until the pull-request event contains both
+# labels. langslanger-pr-hardware.yml owns PR dispatch, while the job graph
+# remains available through workflow_dispatch / workflow_call.
 #
 # Stage: extra-a. Each job mirrors the container bring-up of pr-test-amd.yml
 # and dispatches `run_suite.py --hw amd --suite extra-a-test-{config}-amd`:
@@ -21,11 +18,6 @@ name: PR Test Extra (AMD)
 # (it now exercises the ROCm canary kernels end-to-end).
 
 on:
-  pull_request:
-    # `labeled` lets the workflow re-fire when `run-ci-extra` (or `run-ci`)
-    # is added after the latest push. See call-gate.if for the matching guard
-    # that prevents unrelated label additions from dispatching a full run.
-    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
     inputs:
       runner_arch:
@@ -103,20 +95,20 @@ permissions:
 
 jobs:
   # =============================================== PR Gate ====================================================
-  # Runtime live-fetch label gate (mirrors pr-test-extra.yml's call-gate):
-  # requires both `run-ci` and `run-ci-extra`. A failure here cascades to
-  # every test job via `needs`, so a PR without the labels ends in one red
-  # ~30s gate job plus a row of skipped jobs instead of consuming AMD runners.
+  # The shared gate requires both `run-ci` and `run-ci-extra`. Drafts and PRs
+  # without those opt-in labels skip cleanly without consuming AMD runners.
   #
-  # The job-level `if` only filters the `labeled` event type so that adding an
-  # unrelated label doesn't dispatch a full run; the actual label-presence
-  # gate is enforced at runtime inside pr-gate.yml.
+  # Gate at the caller as well as inside the reusable workflow. GitHub reports
+  # a reusable workflow with only skipped inner jobs as successful, which can
+  # otherwise dispatch hardware jobs without the opt-in labels.
   call-gate:
     if: |
       github.event_name != 'pull_request' ||
-      github.event.action != 'labeled' ||
-      github.event.label.name == 'run-ci' ||
-      github.event.label.name == 'run-ci-extra'
+      (
+        github.event.pull_request.draft == false &&
+        contains(github.event.pull_request.labels.*.name, 'run-ci') &&
+        contains(github.event.pull_request.labels.*.name, 'run-ci-extra')
+      )
     uses: ./.github/workflows/pr-gate.yml
     with:
       require-run-ci: true

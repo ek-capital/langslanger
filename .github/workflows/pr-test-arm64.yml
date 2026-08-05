@@ -3,8 +3,6 @@ name: PR Test (Arm64)
 on:
   push:
     branches: [ main ]
-  pull_request:
-    branches: [ main ]
   workflow_dispatch:
   workflow_call:
     inputs:
@@ -61,13 +59,23 @@ jobs:
 
   pr-gate:
     needs: check-changes
-    if: needs.check-changes.outputs.main_package == 'true'
+    if: |
+      needs.check-changes.outputs.main_package == 'true' &&
+      (
+        github.event_name != 'pull_request' ||
+        (
+          github.event.pull_request.draft == false &&
+          contains(github.event.pull_request.labels.*.name, 'run-ci')
+        )
+      )
     uses: ./.github/workflows/pr-gate.yml
     secrets: inherit
 
   build-test:
     needs: [check-changes, pr-gate]
-    if: needs.check-changes.outputs.main_package == 'true'
+    if: |
+      needs.check-changes.outputs.main_package == 'true' &&
+      needs.pr-gate.result == 'success'
     runs-on: ubuntu-24.04-arm
     steps:
       - name: Checkout repository
@@ -75,14 +83,31 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
 
-      - name: Build container
+      - name: Resolve source revision
+        id: source
+        env:
+          CURRENT_REPO: ${{ format('{0}/{1}.git', github.server_url, github.repository) }}
+          PR_REPO: ${{ github.event.pull_request.head.repo.clone_url }}
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          PR_REPO=${{ github.event.pull_request.head.repo.clone_url }}
-          PR_HEAD_REF=${{ github.head_ref }}
+          if [[ -n "$PR_REPO" && -n "$PR_SHA" ]]; then
+            source_repo="$PR_REPO"
+            source_ref="$PR_SHA"
+          else
+            source_repo="$CURRENT_REPO"
+            source_ref="$(git rev-parse --verify HEAD)"
+          fi
+          echo "repo=$source_repo" >> "$GITHUB_OUTPUT"
+          echo "ref=$source_ref" >> "$GITHUB_OUTPUT"
 
+      - name: Build container
+        env:
+          SGLANG_SOURCE_REPO: ${{ steps.source.outputs.repo }}
+          SGLANG_SOURCE_REF: ${{ steps.source.outputs.ref }}
+        run: |
           docker build \
-            ${PR_REPO:+--build-arg SGLANG_REPO=$PR_REPO} \
-            ${PR_HEAD_REF:+--build-arg VER_SGLANG=$PR_HEAD_REF} \
+            --build-arg SGLANG_REPO="$SGLANG_SOURCE_REPO" \
+            --build-arg VER_SGLANG="$SGLANG_SOURCE_REF" \
             . -f docker/arm64.Dockerfile -t sglang_arm64 --no-cache
 
       - name: Run container

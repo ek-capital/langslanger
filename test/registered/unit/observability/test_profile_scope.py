@@ -12,6 +12,9 @@ from sglang.srt.observability.profile_scope import (
     start_profile_recording,
     stop_profile_recording,
 )
+from sglang.test.ci.ci_register import register_cpu_ci
+
+register_cpu_ci(est_time=2, suite="base-a-test-cpu")
 
 
 class TestProfileScope(unittest.TestCase):

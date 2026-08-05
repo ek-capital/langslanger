@@ -53,6 +53,7 @@ dependencies = [
   "python-multipart",
   "pyzmq>=25.1.2",
   "requests",
+  "safetensors",
   "scipy",
   "sentencepiece",
   "setproctitle",

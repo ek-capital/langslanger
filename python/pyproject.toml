@@ -64,6 +64,7 @@ dependencies = [
   "pyzmq>=25.1.2",
   "quack-kernels>=0.6.1",
   "requests",
+  "safetensors",
   "scipy",
   "sentencepiece",
   "setproctitle",

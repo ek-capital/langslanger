@@ -74,10 +74,17 @@ def _profile_range_impl(
     with ExitStack() as stack:
         if record:
             stack.enter_context(torch.profiler.record_function(debug_name))
-        if nvtx_enabled:
+        if nvtx_enabled and (_nvtx_module is not None or torch.cuda.is_available()):
             if color is None:
                 color = _NVTX_COLOR_MAP.get(debug_name)
-            stack.enter_context(_nvtx_module.annotate(debug_name, color=color))
+            if _nvtx_module is not None:
+                stack.enter_context(_nvtx_module.annotate(debug_name, color=color))
+            else:
+                # The optional Python ``nvtx`` package is not present in every
+                # serving image. PyTorch exposes the same CUDA NVTX ranges and
+                # is already a required dependency, so explicit profiler spans
+                # can still reach Nsight without another runtime package.
+                stack.enter_context(torch.cuda.nvtx.range(debug_name))
         yield
 
 

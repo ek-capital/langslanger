@@ -3,6 +3,8 @@
 The server must start and stop ``CUDA_PROFILER`` through its profiling API.
 Nsight stays idle during model load, captures only that window, and records
 CUDA graph nodes so ``profile_graph_map`` can join kernels to declarations.
+Software CUDA tracing is deliberate: Nsight's hardware tracer can make a large
+LLM graph replay take minutes per node-level capture on recent GPUs.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ def build_nsys_command(output: str | Path, command: list[str]) -> list[str]:
         "nsys",
         "profile",
         "--force-overwrite=true",
-        "--trace=cuda,nvtx,osrt",
+        "--trace=cuda-sw,nvtx,osrt",
         "--trace-fork-before-exec=true",
         "--capture-range=cudaProfilerApi",
         "--capture-range-end=stop",

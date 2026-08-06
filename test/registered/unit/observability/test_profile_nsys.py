@@ -17,6 +17,7 @@ class TestProfileNsys(unittest.TestCase):
         command = build_nsys_command("run", ["python", "-m", "sglang.launch_server"])
         self.assertIn("--capture-range=cudaProfilerApi", command)
         self.assertIn("--cuda-graph-trace=node", command)
+        self.assertIn("--trace=cuda-sw,nvtx,osrt", command)
         self.assertIn("--trace-fork-before-exec=true", command)
         self.assertEqual(command[-3:], ["python", "-m", "sglang.launch_server"])
 

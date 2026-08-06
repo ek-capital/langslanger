@@ -2592,6 +2592,18 @@ class DeepseekV4ForCausalLM(nn.Module):
         self._register_profile_contract()
 
     def _register_profile_contract(self) -> None:
+        # Flash-0731's dense projections are captured before an on-demand
+        # profile starts.  Declare their selected DeepGEMM implementation at
+        # model construction so a later graph replay still has source
+        # provenance even though it never re-enters the Python custom op.
+        quantization_config = getattr(self.config, "quantization_config", None) or {}
+        if quantization_config.get("scale_fmt") == "ue8m0":
+            from sglang.kernels.ops.quantization.fp8_kernel import (
+                _register_deep_gemm_mxfp8_fp4_profile_impl,
+            )
+
+            _register_deep_gemm_mxfp8_fp4_profile_impl()
+
         architecture = (
             self.config.architectures[0]
             if getattr(self.config, "architectures", None)

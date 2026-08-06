@@ -49,7 +49,10 @@ from sglang.srt.environ import envs
 from sglang.srt.model_executor.runner_backend_utils.tc_piecewise_cuda_graph import (
     is_in_tc_piecewise_cuda_graph,
 )
-from sglang.srt.observability.profile_scope import profile_collective_scope
+from sglang.srt.observability.profile_scope import (
+    profile_collective_scope,
+    register_profile_impl,
+)
 from sglang.srt.platforms.device_mixin import _DEVICE_TO_DISTRIBUTED_BACKEND
 from sglang.srt.runtime_context import (
     get_global_dwdp_manager,
@@ -283,6 +286,7 @@ class GroupCoordinator:
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
         _register_group(self)
+        self._profiled_collective_implementations: set[str] = set()
 
         # Set rank info
         self.rank = torch.distributed.get_rank()
@@ -651,6 +655,71 @@ class GroupCoordinator:
         ):
             return self._all_reduce_profiled(input_)
 
+    def _register_collective_profile_impl(self, method: str) -> None:
+        """Persist the concrete all-reduce backend selected during graph capture."""
+        key = f"all_reduce:{method}"
+        if key in self._profiled_collective_implementations:
+            return
+        self._profiled_collective_implementations.add(key)
+
+        communicator = {
+            "ca": self.ca_comm,
+            "qr": self.qr_comm,
+            "pymscclpp": self.pymscclpp_comm,
+            "torch_symm_mem": self.torch_symm_mem_comm,
+            "pynccl": self.pynccl_comm,
+        }.get(method)
+        source_files = {
+            "ca": (
+                "python/sglang/srt/distributed/device_communicators/custom_all_reduce.py",
+                "python/sglang/srt/distributed/device_communicators/custom_all_reduce_v2.py",
+            ),
+            "qr": (
+                "python/sglang/srt/distributed/device_communicators/quick_all_reduce.py",
+            ),
+            "pymscclpp": (
+                "python/sglang/srt/distributed/device_communicators/pymscclpp.py",
+            ),
+            "torch_symm_mem": (
+                "python/sglang/srt/distributed/device_communicators/torch_symm_mem.py",
+            ),
+            "pynccl": (
+                "python/sglang/srt/distributed/device_communicators/pynccl.py",
+                "python/sglang/srt/distributed/device_communicators/pynccl_wrapper.py",
+            ),
+            "torch_distributed": (__file__,),
+        }[method]
+        expected_symbols = {
+            "ca": ("all_reduce_kernel",),
+            "qr": ("quick_all_reduce",),
+            "pymscclpp": ("msccl", "all_reduce"),
+            "torch_symm_mem": ("multimem", "all_reduce"),
+            "pynccl": ("ncclDevKernel_AllReduce", "ncclKernel_AllReduce"),
+            "torch_distributed": (
+                "ncclDevKernel_AllReduce",
+                "ncclKernel_AllReduce",
+            ),
+        }[method]
+        implementation = (
+            f"{type(communicator).__module__}.{type(communicator).__qualname__}"
+            if communicator is not None
+            else "torch.distributed.all_reduce"
+        )
+        register_profile_impl(
+            "model.collective",
+            implementation,
+            source_objects=(type(communicator),) if communicator is not None else (),
+            source_files=source_files,
+            expected_symbols=expected_symbols,
+            loaded_modules=("sglang", "sgl_kernel", "torch"),
+            conditions={
+                "operation": "all_reduce",
+                "method": method,
+                "group_name": self.unique_name,
+                "world_size": self.world_size,
+            },
+        )
+
     def _all_reduce_profiled(self, input_: torch.Tensor) -> torch.Tensor:
         if input_.is_cpu:
             if is_shm_available(input_.dtype, self.world_size, self.local_size):
@@ -723,6 +792,7 @@ class GroupCoordinator:
             and not should_use_pymscclpp_allreduce
             and not _ca_takes_input
         ):
+            self._register_collective_profile_impl("pynccl")
             self.debug_check_symmetric_mempool(self, {"input": input_}, "all_reduce")
             with self.pynccl_comm.change_state(enable=True):
                 self.pynccl_comm.all_reduce(input_)
@@ -951,6 +1021,7 @@ class GroupCoordinator:
         torch_symm_mem_comm = self.torch_symm_mem_comm
         pynccl_comm = self.pynccl_comm
         assert any([qr_comm, ca_comm, pymscclpp_comm, torch_symm_mem_comm, pynccl_comm])
+        self._register_collective_profile_impl(outplace_all_reduce_method)
         if outplace_all_reduce_method == "ca":
             assert not ca_comm.disabled
             out = ca_comm.custom_all_reduce(input_)
@@ -973,14 +1044,17 @@ class GroupCoordinator:
         pynccl_comm = self.pynccl_comm
         torch_symm_mem_comm = self.torch_symm_mem_comm
         if pynccl_comm is not None and not pynccl_comm.disabled:
+            self._register_collective_profile_impl("pynccl")
             pynccl_comm.all_reduce(input_)
         elif (
             torch_symm_mem_comm is not None
             and not torch_symm_mem_comm.disabled
             and torch_symm_mem_comm.should_torch_symm_mem_allreduce(input_)
         ):
+            self._register_collective_profile_impl("torch_symm_mem")
             torch_symm_mem_comm.all_reduce(input_, out=input_)
         else:
+            self._register_collective_profile_impl("torch_distributed")
             torch.distributed.all_reduce(input_, group=self.device_group)
 
     def reduce_scatter_along_dim(

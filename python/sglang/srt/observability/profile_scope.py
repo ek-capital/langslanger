@@ -21,9 +21,11 @@ from sglang.srt.distributed.parallel_state_wrapper import ParallelState
 from sglang.srt.observability.profile_manifest import profile_rank_label
 from sglang.srt.utils.nvtx_utils import profile_range
 
-PROFILE_STEP_SCHEMA_VERSION = 2
+PROFILE_STEP_SCHEMA_VERSION = 3
 _LOCK = threading.Lock()
 _RECORDER: _ProfileStepRecorder | None = None
+_REGISTERED_IMPLEMENTATIONS: dict[str, dict[str, Any]] = {}
+_REGISTERED_CONTRACTS: dict[str, dict[str, Any]] = {}
 
 
 class _ProfileStepRecorder:
@@ -84,12 +86,6 @@ class _ProfileStepRecorder:
     def collective_metadata(
         self, name: str, metadata: dict[str, Any]
     ) -> dict[str, Any]:
-        if name != "model.collective":
-            return metadata
-        group = str(metadata.get("group_name") or metadata.get("backend") or "model")
-        with self._lock:
-            sequence = self._collective_sequences.get(group, 0) + 1
-            self._collective_sequences[group] = sequence
         parent_metadata = {}
         for _, parent in reversed(getattr(self._scope_local, "stack", [])):
             if parent.get("scheduler_iteration") is None:
@@ -106,8 +102,14 @@ class _ProfileStepRecorder:
                 )
             }
             break
+        metadata = {**parent_metadata, **metadata}
+        if name != "model.collective":
+            return metadata
+        group = str(metadata.get("group_name") or metadata.get("backend") or "model")
+        with self._lock:
+            sequence = self._collective_sequences.get(group, 0) + 1
+            self._collective_sequences[group] = sequence
         return {
-            **parent_metadata,
             **metadata,
             "collective_group": group,
             "collective_sequence": sequence,
@@ -156,6 +158,15 @@ def start_profile_recording(
             profile_prefix=profile_prefix,
             stage=stage,
             ps=ps,
+        )
+        recorder = _RECORDER
+        implementations = list(_REGISTERED_IMPLEMENTATIONS.values())
+        contracts = list(_REGISTERED_CONTRACTS.values())
+    for contract in contracts:
+        _write_profile_contract(recorder, contract)
+    for declaration in implementations:
+        _write_profile_impl(
+            recorder, declaration, lifecycle="registered_before_profile"
         )
     record_profile_clock_sync()
 
@@ -249,57 +260,192 @@ def record_profile_impl(
     recorder = _RECORDER
     if recorder is None:
         return
+    declaration = _profile_impl_declaration(
+        scope=scope,
+        implementation=implementation,
+        source_objects=source_objects,
+        source_files=source_files,
+        expected_symbols=expected_symbols,
+        loaded_modules=loaded_modules,
+        conditions=conditions,
+    )
+    _write_profile_impl(recorder, declaration, lifecycle="observed_during_profile")
 
-    declaration = {
+
+def register_profile_impl(
+    scope: str,
+    implementation: str,
+    *,
+    source_objects: tuple[Any, ...] = (),
+    source_files: tuple[str | Path, ...] = (),
+    expected_symbols: tuple[str, ...] = (),
+    loaded_modules: tuple[str, ...] = (),
+    conditions: dict[str, Any] | None = None,
+) -> None:
+    """Persist a runtime dispatch decision for every later profile.
+
+    Use this at model/backend construction time for choices that will execute
+    inside a CUDA graph.  Graph replay does not re-enter the Python dispatcher,
+    so an implementation recorded only from the hot path would otherwise be
+    absent when profiling begins after graph capture.
+    """
+    declaration = _profile_impl_declaration(
+        scope=scope,
+        implementation=implementation,
+        source_objects=source_objects,
+        source_files=source_files,
+        expected_symbols=expected_symbols,
+        loaded_modules=loaded_modules,
+        conditions=conditions,
+    )
+    declaration_key = _profile_impl_key(declaration)
+    with _LOCK:
+        _REGISTERED_IMPLEMENTATIONS.setdefault(declaration_key, declaration)
+        recorder = _RECORDER
+    if recorder is not None:
+        _write_profile_impl(
+            recorder, declaration, lifecycle="registered_during_profile"
+        )
+
+
+def register_profile_contract(
+    model_family: str,
+    architecture: str,
+    *,
+    required_implementation_scopes: tuple[str, ...],
+    graph_required_scopes: tuple[str, ...] = (),
+    minimum_kernel_duration_attribution: float = 0.8,
+    minimum_graph_duration_attribution: float = 0.8,
+    require_hashed_sources: bool = True,
+) -> None:
+    """Declare the evidence required before a model profile is considered valid.
+
+    Scope names are architecture-neutral so DeepSeek, Kimi, and future models
+    can be compared without changing the report schema.  Model files only list
+    the components their architecture actually executes.
+    """
+    for name, value in (
+        ("minimum_kernel_duration_attribution", minimum_kernel_duration_attribution),
+        ("minimum_graph_duration_attribution", minimum_graph_duration_attribution),
+    ):
+        if not 0 <= value <= 1:
+            raise ValueError(f"{name} must be between 0 and 1, got {value}")
+    contract = {
+        "event": "profile_contract",
+        "model_family": model_family,
+        "architecture": architecture,
+        "required_implementation_scopes": sorted(set(required_implementation_scopes)),
+        "graph_required_scopes": sorted(set(graph_required_scopes)),
+        "minimum_kernel_duration_attribution": minimum_kernel_duration_attribution,
+        "minimum_graph_duration_attribution": minimum_graph_duration_attribution,
+        "require_hashed_sources": require_hashed_sources,
+    }
+    identity = json.dumps(contract, separators=(",", ":"), sort_keys=True)
+    contract["contract_id"] = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    with _LOCK:
+        _REGISTERED_CONTRACTS.setdefault(contract["contract_id"], contract)
+        recorder = _RECORDER
+    if recorder is not None:
+        _write_profile_contract(recorder, contract)
+
+
+def _profile_impl_declaration(
+    *,
+    scope: str,
+    implementation: str,
+    source_objects: tuple[Any, ...],
+    source_files: tuple[str | Path, ...],
+    expected_symbols: tuple[str, ...],
+    loaded_modules: tuple[str, ...],
+    conditions: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
         "scope": scope,
         "implementation": implementation,
-        "source_objects": [_object_label(obj) for obj in source_objects],
+        "source_object_labels": [_object_label(obj) for obj in source_objects],
+        "source_objects": source_objects,
         "source_files": [str(path) for path in source_files],
         "expected_symbols": sorted(set(expected_symbols)),
         "loaded_modules": sorted(set(loaded_modules)),
         "conditions": _jsonable_metadata(conditions or {}),
     }
-    declaration_key = (
+
+
+def _profile_impl_key(declaration: dict[str, Any]) -> str:
+    identity = {
+        key: value for key, value in declaration.items() if key != "source_objects"
+    }
+    return (
         "implementation:"
         + hashlib.sha256(
-            json.dumps(declaration, separators=(",", ":"), sort_keys=True).encode(
-                "utf-8"
-            )
+            json.dumps(identity, separators=(",", ":"), sort_keys=True).encode("utf-8")
         ).hexdigest()
     )
+
+
+def _write_profile_impl(
+    recorder: _ProfileStepRecorder,
+    declaration: dict[str, Any],
+    *,
+    lifecycle: str,
+) -> None:
+    declaration_key = _profile_impl_key(declaration)
     if not recorder.claim_once(declaration_key):
         return
 
     sources = {
         record["path"]: record
         for record in (
-            *(_provenance_for_object(obj) for obj in source_objects),
-            *(_provenance_for_path(path) for path in source_files),
+            *(_provenance_for_object(obj) for obj in declaration["source_objects"]),
+            *(_provenance_for_path(path) for path in declaration["source_files"]),
         )
         if record is not None
     }
     libraries = {}
-    for module_prefix in loaded_modules:
+    for module_prefix in declaration["loaded_modules"]:
         for record in _loaded_module_provenance(module_prefix):
             libraries[(record["module"], record.get("path"))] = record
 
     record = {
         "event": "implementation",
-        "scope": scope,
-        "implementation": implementation,
+        "scope": declaration["scope"],
+        "implementation": declaration["implementation"],
         "conditions": declaration["conditions"],
-        "expected_symbols": sorted(set(expected_symbols)),
+        "expected_symbols": declaration["expected_symbols"],
         "sources": [sources[path] for path in sorted(sources)],
         "loaded_libraries": [
             libraries[key] for key in sorted(libraries, key=lambda item: str(item))
         ],
         "attribution_source": "explicit_dispatch_declaration",
+        "declaration_lifecycle": lifecycle,
     }
-    identity_payload = json.dumps(record, separators=(",", ":"), sort_keys=True)
+    # Lifecycle says when this profile learned the declaration; it is not part
+    # of the implementation's identity.  The same dispatch decision must join
+    # to the same ID before and after CUDA graph capture.
+    identity_record = dict(record)
+    identity_record.pop("declaration_lifecycle")
+    identity_payload = json.dumps(
+        identity_record, separators=(",", ":"), sort_keys=True
+    )
     record["implementation_id"] = hashlib.sha256(
         identity_payload.encode("utf-8")
     ).hexdigest()[:16]
     recorder.write(record)
+
+
+def _write_profile_contract(
+    recorder: _ProfileStepRecorder, contract: dict[str, Any]
+) -> None:
+    key = f"contract:{contract['contract_id']}"
+    if recorder.claim_once(key):
+        recorder.write(dict(contract))
+
+
+def _clear_profile_registrations_for_test() -> None:
+    """Clear process-global declarations. Tests only; serving never calls this."""
+    with _LOCK:
+        _REGISTERED_IMPLEMENTATIONS.clear()
+        _REGISTERED_CONTRACTS.clear()
 
 
 def profile_scope(name: str, **metadata: Any):
@@ -320,7 +466,10 @@ def _profile_scope_recorded(
     )
     recorder.push_scope(name, metadata)
     try:
-        with profile_range(name):
+        # NVTX is enabled only while the sidecar recorder is active. This gives
+        # Nsight the same semantic scopes as Kineto without affecting normal
+        # serving or requiring a second instrumentation API.
+        with profile_range(name, nvtx_enabled=True):
             yield
     finally:
         recorder.pop_scope()

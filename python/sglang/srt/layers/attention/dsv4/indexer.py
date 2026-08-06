@@ -40,6 +40,10 @@ from sglang.srt.model_executor.runner_backend_utils.breakable_cuda_graph.context
 from sglang.srt.model_executor.runner_backend_utils.tc_piecewise_cuda_graph import (
     is_in_tc_piecewise_cuda_graph,
 )
+from sglang.srt.observability.profile_scope import (
+    profile_scope,
+    register_profile_impl,
+)
 from sglang.srt.runtime_context import get_exec, get_parallel
 from sglang.srt.state_capturer.indexer_topk import get_global_indexer_capturer
 from sglang.srt.utils import add_prefix, is_cuda, is_hip, is_xpu
@@ -925,6 +929,55 @@ class C4Indexer(nn.Module):
 
         self.use_fp4_indexer = get_exec().kernel.enable_deepseek_v4_fp4_indexer
         self.alt_streams = alt_streams
+        self._register_profile_implementation()
+
+    def _register_profile_implementation(self) -> None:
+        if self.use_fp4_indexer:
+            implementation = "deep_gemm.fp8_fp4_paged_mqa_logits"
+            expected_symbols = (
+                "fp8_fp4_paged_mqa_logits",
+                "quantize_fp4_indexer_kernel",
+                "store_fp4_index_k_cache_kernel",
+                "topk_transform",
+            )
+            modules = ("deep_gemm",)
+        elif envs.SGLANG_OPT_USE_TILELANG_INDEXER.get():
+            implementation = "tilelang.fp8_paged_mqa_logits"
+            expected_symbols = ("fp8_paged_mqa_logits", "topk_transform")
+            modules = ("tilelang",)
+        elif envs.SGLANG_OPT_USE_AITER_INDEXER.get():
+            implementation = "aiter.fp8_paged_mqa_logits"
+            expected_symbols = ("fp8_paged_mqa_logits", "topk_transform")
+            modules = ("aiter",)
+        elif envs.SGLANG_FP8_PAGED_MQA_LOGITS_TORCH.get():
+            implementation = "torch.fp8_paged_mqa_logits"
+            expected_symbols = ("fp8_paged_mqa_logits", "topk_transform")
+            modules = ("torch",)
+        elif is_xpu():
+            implementation = "sgl_kernel.fp8_paged_mqa_logits_triton"
+            expected_symbols = ("fp8_paged_mqa_logits", "topk_transform")
+            modules = ("sgl_kernel",)
+        else:
+            implementation = "deep_gemm.fp8_paged_mqa_logits"
+            expected_symbols = ("fp8_paged_mqa_logits", "topk_transform")
+            modules = ("deep_gemm",)
+
+        register_profile_impl(
+            "model.attention.indexer",
+            implementation,
+            source_files=(
+                __file__,
+                "python/sglang/kernels/ops/attention/dsv4/fp4_indexer.py",
+                "python/sglang/kernels/ops/attention/dsv4/topk.py",
+            ),
+            expected_symbols=expected_symbols,
+            loaded_modules=modules,
+            conditions={
+                "architecture": "deepseek_v4",
+                "fp4": self.use_fp4_indexer,
+                "nonpaged_prefill_enabled": envs.SGLANG_OPT_DSV4_NONPAGED_INDEXER.get(),
+            },
+        )
 
     def compute_q(
         self,
@@ -958,13 +1011,19 @@ class C4Indexer(nn.Module):
         q_lora_ready: Optional[torch.cuda.Event] = None,
         skip_compressor: bool = False,
     ) -> None:
-        return attn_backend.forward_c4_indexer(
-            x=x,
-            q_lora=q_lora,
-            forward_batch=forward_batch,
-            c4_indexer=self,
-            alt_streams=self.alt_streams,
-            enable_multi_stream=enable_multi_stream,
-            q_lora_ready=q_lora_ready,
-            skip_compressor=skip_compressor,
-        )
+        with profile_scope(
+            "model.attention.indexer",
+            layer=self.layer_id,
+            forward_mode=str(forward_batch.forward_mode),
+            fp4=self.use_fp4_indexer,
+        ):
+            return attn_backend.forward_c4_indexer(
+                x=x,
+                q_lora=q_lora,
+                forward_batch=forward_batch,
+                c4_indexer=self,
+                alt_streams=self.alt_streams,
+                enable_multi_stream=enable_multi_stream,
+                q_lora_ready=q_lora_ready,
+                skip_compressor=skip_compressor,
+            )

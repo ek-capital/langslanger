@@ -14,6 +14,7 @@ import torch
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
+from sglang.srt.observability.profile_scope import register_profile_impl
 from sglang.srt.utils import is_flashinfer_available, log_info_on_rank0
 from sglang.srt.utils.common import is_sm120_supported
 
@@ -100,6 +101,25 @@ class Mxfp4FlashinferCutlassMoEMethod:
         # Register the fused func at runner construction so the FusedOpPool
         # lookup at `MoeRunner.__init__` finds it.
         import sglang.srt.layers.moe.moe_runner.flashinfer_cutlass  # noqa: F401
+
+        arch = "sm120" if self._use_mxfp8_act_scaling else "sm90"
+        register_profile_impl(
+            "model.moe.experts",
+            f"flashinfer.cutlass_mxfp4.{arch}",
+            source_files=(
+                __file__,
+                "python/sglang/srt/layers/moe/moe_runner/flashinfer_cutlass.py",
+            ),
+            expected_symbols=("cutlass_fused_moe", "fused_moe"),
+            loaded_modules=("flashinfer",),
+            conditions={
+                "quantization": "mxfp4",
+                "gpu_arch": arch,
+                "activation_scaling": (
+                    "mxfp8" if self._use_mxfp8_act_scaling else "bf16"
+                ),
+            },
+        )
 
         self.runner = MoeRunner(MoeRunnerBackend.FLASHINFER_MXFP4, moe_runner_config)
 

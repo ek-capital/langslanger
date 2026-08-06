@@ -82,6 +82,7 @@ class TestProfileGraphMap(unittest.TestCase):
                 json.dumps(
                     {
                         "profile_id": "profile-1",
+                        "processes": [{"pid": 42, "rank_label": "TP-6"}],
                         "implementations": [
                             {
                                 "implementation_id": "impl-1",
@@ -98,6 +99,14 @@ class TestProfileGraphMap(unittest.TestCase):
                                 "loaded_libraries": [],
                             }
                         ],
+                        "contracts": [
+                            {
+                                "contract_id": "contract-1",
+                                "graph_required_scopes": ["model.attention.mla"],
+                                "minimum_graph_duration_attribution": 0.8,
+                                "require_hashed_sources": True,
+                            }
+                        ],
                     }
                 ),
                 encoding="utf-8",
@@ -107,8 +116,13 @@ class TestProfileGraphMap(unittest.TestCase):
             self.assertFalse(result["authoritative_serving_timing"])
             self.assertEqual(result["input"]["nsight_export_schema_version"], "3.28.1")
             self.assertEqual(result["coverage"]["canonical_graph_nodes"], 1)
+            self.assertEqual(
+                result["coverage"]["graph_duration_attribution_ratio"], 1.0
+            )
+            self.assertEqual(result["coverage"]["nonoverlap_graph_kernel_ms"], 0.0003)
             node = result["graph_nodes"][0]
             self.assertEqual(node["canonical_graph_node_id"], 10)
+            self.assertEqual(node["rank_label"], "TP-6")
             self.assertEqual(node["observed_graph_node_ids"], [11])
             self.assertEqual(node["kernel_occurrences"], 2)
             self.assertEqual(node["symbols"][0]["symbol"], "void mla_kernel<float>()")
@@ -117,6 +131,13 @@ class TestProfileGraphMap(unittest.TestCase):
                 node["source_candidates"][0]["sources"][0]["git_blob"],
                 "source-blob",
             )
+            self.assertEqual(result["components"][0]["scope"], "model.attention.mla")
+            self.assertEqual(
+                result["components"][0]["percent_of_graph_nonoverlap_kernel_time"],
+                100.0,
+            )
+            self.assertEqual(result["components"][0]["ranks"][0]["rank_label"], "TP-6")
+            self.assertEqual(result["validation"]["status"], "passed")
 
             output_path = write_graph_map(
                 sqlite_path, profile_report_path=profile_report_path

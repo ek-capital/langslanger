@@ -25,7 +25,7 @@ from sglang.srt.observability.profile_scope import (
     stop_profile_recording,
 )
 from sglang.srt.platforms import current_platform
-from sglang.srt.runtime_context import get_device
+from sglang.srt.runtime_context import get_device, get_server_args
 from sglang.srt.utils import is_mps, is_npu
 from sglang.srt.utils.profile_merger import ProfileMerger
 from sglang.srt.utils.profile_utils import ProfileManager

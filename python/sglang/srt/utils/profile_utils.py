@@ -18,7 +18,7 @@ from sglang.srt.observability.profile_scope import (
     stop_profile_recording,
 )
 from sglang.srt.platforms import current_platform
-from sglang.srt.runtime_context import get_device
+from sglang.srt.runtime_context import get_device, get_server_args
 from sglang.srt.utils import is_npu
 from sglang.srt.utils.torch_npu_patch_utils import apply_torch_npu_patches
 

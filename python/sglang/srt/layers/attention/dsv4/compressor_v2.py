@@ -12,6 +12,7 @@ from sglang.kernels.ops.attention.dsv4 import (
     compress_norm_rope_store,
 )
 from sglang.srt.environ import envs
+from sglang.srt.observability.profile_scope import profile_scope
 
 if TYPE_CHECKING:
     from sglang.srt.layers.attention.deepseek_v4_backend import DSV4Metadata
@@ -200,6 +201,27 @@ class CompressorBackendMixin:
         )
 
     def forward_unified(
+        self,
+        x: torch.Tensor,
+        forward_batch: ForwardBatch,
+        layer_id: int,
+        compressor: Compressor,
+    ) -> None:
+        with profile_scope(
+            "model.attention.compressor",
+            layer=layer_id,
+            compress_ratio=compressor.ratio,
+            indexer=compressor.is_in_indexer,
+            forward_mode=str(forward_batch.forward_mode),
+        ):
+            return self._forward_unified_impl(
+                x=x,
+                forward_batch=forward_batch,
+                layer_id=layer_id,
+                compressor=compressor,
+            )
+
+    def _forward_unified_impl(
         self,
         x: torch.Tensor,
         forward_batch: ForwardBatch,

@@ -18,8 +18,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-PROFILE_REPORT_SCHEMA_VERSION = 3
-_GPU_CATEGORIES = {"kernel", "gpu_memcpy", "gpu_memset", "gpu_user_annotation"}
+PROFILE_REPORT_SCHEMA_VERSION = 4
+_GPU_WORK_CATEGORIES = {"kernel", "gpu_memcpy", "gpu_memset"}
+_GPU_ANNOTATION_CATEGORY = "gpu_user_annotation"
+_GPU_CATEGORIES = _GPU_WORK_CATEGORIES | {_GPU_ANNOTATION_CATEGORY}
 
 
 @dataclass
@@ -75,7 +77,12 @@ class _TraceClockAlignment:
         return self.convert_us(event.start_us), self.convert_us(event.end_us)
 
 
-def analyze_profile(profile_dir: str | Path, profile_id: str | None = None):
+def analyze_profile(
+    profile_dir: str | Path,
+    profile_id: str | None = None,
+    *,
+    graph_map_path: str | Path | None = None,
+):
     """Analyze matching per-rank manifests and return a JSON-compatible report."""
     profile_dir = Path(profile_dir).expanduser().resolve()
     manifests = _load_manifests(profile_dir, profile_id)
@@ -97,11 +104,21 @@ def analyze_profile(profile_dir: str | Path, profile_id: str | None = None):
     all_invocations: list[tuple[dict[str, Any], _ScopeInvocation]] = []
     scheduler_results: list[tuple[dict[str, Any], dict[str, Any]]] = []
     implementation_records: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    contract_records: list[dict[str, Any]] = []
+    graph_execution_records: list[dict[str, Any]] = []
     incomplete_rank_artifacts: list[str] = []
     total_gpu_events = 0
     attributed_gpu_events: set[tuple[str, int]] = set()
+    total_kernel_events = 0
+    attributed_kernel_events: set[tuple[str, int]] = set()
+    total_annotation_events = 0
+    attributed_annotation_events: set[tuple[str, int]] = set()
     total_gpu_work_us = 0.0
     unattributed_gpu_work_us = 0.0
+    total_kernel_work_us = 0.0
+    unattributed_kernel_work_us = 0.0
+    total_annotation_us = 0.0
+    unattributed_annotation_us = 0.0
     trace_clock_alignments: list[dict[str, Any]] = []
 
     for manifest_path, manifest in manifests:
@@ -129,10 +146,25 @@ def analyze_profile(profile_dir: str | Path, profile_id: str | None = None):
                 scheduler_results.append((manifest, record))
             elif record.get("event") == "implementation":
                 implementation_records.append((manifest, record))
+            elif record.get("event") == "profile_contract":
+                contract_records.append(record)
+            elif record.get("event") == "model_forward_end":
+                graph_execution_records.append(record)
 
         for trace_path in trace_paths:
             trace_events = _read_trace(trace_path)
-            gpu_events = [event for event in trace_events if _is_gpu_event(event)]
+            all_gpu_events = [event for event in trace_events if _is_gpu_event(event)]
+            gpu_events = [
+                event for event in all_gpu_events if _is_gpu_work_event(event)
+            ]
+            kernel_events = [
+                event for event in all_gpu_events if event.category.lower() == "kernel"
+            ]
+            annotation_events = [
+                event
+                for event in all_gpu_events
+                if event.category.lower() == _GPU_ANNOTATION_CATEGORY
+            ]
             cpu_events = [event for event in trace_events if not _is_gpu_event(event)]
             clock_alignment = _trace_clock_alignment(
                 cpu_events, clock_sync_records, manifest, warnings
@@ -148,6 +180,10 @@ def analyze_profile(profile_dir: str | Path, profile_id: str | None = None):
                 )
             total_gpu_events += len(gpu_events)
             total_gpu_work_us += sum(event.duration_us for event in gpu_events)
+            total_kernel_events += len(kernel_events)
+            total_kernel_work_us += sum(event.duration_us for event in kernel_events)
+            total_annotation_events += len(annotation_events)
+            total_annotation_us += sum(event.duration_us for event in annotation_events)
 
             invocations = _scope_invocations(cpu_events, scope_metadata, warnings)
             external_to_scopes = _external_id_scopes(cpu_events, invocations)
@@ -155,8 +191,12 @@ def analyze_profile(profile_dir: str | Path, profile_id: str | None = None):
                 matched = external_to_scopes.get(gpu_event.external_id, [])
                 if not matched:
                     unattributed_gpu_work_us += gpu_event.duration_us
+                    if gpu_event.category.lower() == "kernel":
+                        unattributed_kernel_work_us += gpu_event.duration_us
                     continue
                 attributed_gpu_events.add((str(trace_path), gpu_index))
+                if gpu_event.category.lower() == "kernel":
+                    attributed_kernel_events.add((str(trace_path), gpu_index))
                 for invocation in matched:
                     invocation.gpu_events.append(gpu_event)
                     if clock_alignment is not None:
@@ -171,6 +211,13 @@ def analyze_profile(profile_dir: str | Path, profile_id: str | None = None):
                     exclusive_invocation.aligned_exclusive_gpu_intervals.append(
                         clock_alignment.interval(gpu_event)
                     )
+            for annotation_index, annotation in enumerate(annotation_events):
+                if external_to_scopes.get(annotation.external_id, []):
+                    attributed_annotation_events.add(
+                        (str(trace_path), annotation_index)
+                    )
+                else:
+                    unattributed_annotation_us += annotation.duration_us
             all_invocations.extend((manifest, invocation) for invocation in invocations)
 
     committed_by_replica_iteration = _deduplicate_scheduler_results(
@@ -214,7 +261,27 @@ def analyze_profile(profile_dir: str | Path, profile_id: str | None = None):
     coverage = (
         len(attributed_gpu_events) / total_gpu_events if total_gpu_events else None
     )
-    return {
+    kernel_event_coverage = (
+        len(attributed_kernel_events) / total_kernel_events
+        if total_kernel_events
+        else None
+    )
+    kernel_duration_coverage = (
+        (total_kernel_work_us - unattributed_kernel_work_us) / total_kernel_work_us
+        if total_kernel_work_us
+        else None
+    )
+    annotation_coverage = (
+        len(attributed_annotation_events) / total_annotation_events
+        if total_annotation_events
+        else None
+    )
+    contracts = _deduplicate_contracts(contract_records)
+    graph_used = any(
+        record.get("can_run_graph") is True for record in graph_execution_records
+    )
+    graph_map = _load_graph_map(graph_map_path)
+    report = {
         "schema_version": PROFILE_REPORT_SCHEMA_VERSION,
         "profile_id": profile_id,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -244,25 +311,60 @@ def analyze_profile(profile_dir: str | Path, profile_id: str | None = None):
                 "aligned_rank_traces": len(trace_clock_alignments),
             },
             "artifact_integrity": integrity,
-            "gpu_events": total_gpu_events,
+            "gpu_work_events": total_gpu_events,
             "attributed_gpu_events": len(attributed_gpu_events),
+            "gpu_work_event_attribution_ratio": coverage,
+            # Compatibility alias. From schema v4 this excludes annotations.
             "gpu_event_attribution_ratio": coverage,
+            "summed_gpu_work_ms": total_gpu_work_us / 1000.0,
             "gpu_work_ms": total_gpu_work_us / 1000.0,
+            "attributed_gpu_work_ms": (total_gpu_work_us - unattributed_gpu_work_us)
+            / 1000.0,
             "unattributed_gpu_work_ms": unattributed_gpu_work_us / 1000.0,
+            "kernel_events": total_kernel_events,
+            "attributed_kernel_events": len(attributed_kernel_events),
+            "kernel_event_attribution_ratio": kernel_event_coverage,
+            "summed_kernel_work_ms": total_kernel_work_us / 1000.0,
+            "attributed_kernel_work_ms": (
+                total_kernel_work_us - unattributed_kernel_work_us
+            )
+            / 1000.0,
+            "unattributed_kernel_work_ms": unattributed_kernel_work_us / 1000.0,
+            "kernel_duration_attribution_ratio": kernel_duration_coverage,
+            "gpu_annotation_events": total_annotation_events,
+            "attributed_gpu_annotation_events": len(attributed_annotation_events),
+            "gpu_annotation_event_attribution_ratio": annotation_coverage,
+            "summed_gpu_annotation_ms": total_annotation_us / 1000.0,
+            "unattributed_gpu_annotation_ms": unattributed_annotation_us / 1000.0,
         },
         "normalization": {
             "committed_tokens": sum(committed_by_replica_iteration.values()),
             "unique_replica_iterations": len(committed_by_replica_iteration),
             "replica_key": "dp_rank plus scheduler_iteration",
         },
+        "processes": [
+            {
+                "rank_label": manifest.get("rank_label", "unknown"),
+                "stage": manifest.get("stage"),
+                **manifest.get("process", {}),
+            }
+            for _, manifest in manifests
+        ],
         "scopes": scopes,
         "rank_bucket_scopes": groups,
         "ranks": ranks,
         "distributed_steps": distributed_steps,
         "communication": communication,
         "implementations": implementations,
+        "contracts": contracts,
+        "graph": {
+            "used": graph_used,
+            "map_path": str(Path(graph_map_path).resolve()) if graph_map_path else None,
+        },
         "warnings": sorted(set(warnings)),
     }
+    report["validation"] = _validate_profile_report(report, graph_map)
+    return report
 
 
 def write_profile_report(
@@ -270,8 +372,14 @@ def write_profile_report(
     *,
     profile_id: str | None = None,
     output_dir: str | Path | None = None,
+    graph_map_path: str | Path | None = None,
+    strict: bool = True,
 ) -> tuple[Path, Path]:
-    report = analyze_profile(profile_dir, profile_id)
+    report = analyze_profile(profile_dir, profile_id, graph_map_path=graph_map_path)
+    if strict and report["validation"]["status"] == "failed":
+        raise ValueError(
+            "profile validation failed: " + "; ".join(report["validation"]["errors"])
+        )
     output_dir = Path(output_dir or profile_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = _safe_output_stem(report["profile_id"])
@@ -869,6 +977,122 @@ def _is_gpu_event(event: _TraceEvent) -> bool:
     return category in _GPU_CATEGORIES or category.startswith("gpu_")
 
 
+def _is_gpu_work_event(event: _TraceEvent) -> bool:
+    return event.category.lower() in _GPU_WORK_CATEGORIES
+
+
+def _deduplicate_contracts(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    contracts = {}
+    for record in records:
+        contract = dict(record)
+        contract.pop("record_id", None)
+        contract.pop("monotonic_time_ns", None)
+        contract_id = contract.get("contract_id")
+        if contract_id is not None:
+            contracts[contract_id] = contract
+    return [contracts[key] for key in sorted(contracts)]
+
+
+def _load_graph_map(path: str | Path | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_file():
+        raise ValueError(f"graph map does not exist: {resolved}")
+    return json.loads(resolved.read_text(encoding="utf-8"))
+
+
+def _validate_profile_report(
+    report: dict[str, Any], graph_map: dict[str, Any] | None
+) -> dict[str, Any]:
+    contracts = report["contracts"]
+    if not contracts:
+        return {
+            "status": "not_required",
+            "errors": [],
+            "evidence": "no model profiling contract was declared",
+        }
+
+    errors = []
+    implementations = report["implementations"]
+    implementation_scopes = {record.get("scope") for record in implementations}
+    required_scopes = {
+        scope
+        for contract in contracts
+        for scope in contract.get("required_implementation_scopes", [])
+    }
+    missing_implementations = sorted(required_scopes - implementation_scopes)
+    if missing_implementations:
+        errors.append(
+            "missing implementation declarations for "
+            + ", ".join(missing_implementations)
+        )
+
+    if any(contract.get("require_hashed_sources", True) for contract in contracts):
+        unhashed = []
+        for implementation in implementations:
+            sources = implementation.get("sources", [])
+            if implementation.get("scope") in required_scopes and (
+                not sources or any(not source.get("sha256") for source in sources)
+            ):
+                unhashed.append(implementation.get("implementation_id", "unknown"))
+        if unhashed:
+            errors.append(
+                "implementations lack hashed sources: " + ", ".join(sorted(unhashed))
+            )
+
+    graph_used = report["graph"]["used"]
+    graph_required_scopes = {
+        scope
+        for contract in contracts
+        for scope in contract.get("graph_required_scopes", [])
+    }
+    if graph_used:
+        if graph_map is None:
+            errors.append("CUDA graph execution requires an Nsight graph map")
+        else:
+            graph_coverage = graph_map.get("coverage", {}).get(
+                "graph_duration_attribution_ratio"
+            )
+            minimum = max(
+                contract.get("minimum_graph_duration_attribution", 0.0)
+                for contract in contracts
+            )
+            if graph_coverage is None or graph_coverage < minimum:
+                errors.append(
+                    "graph duration attribution below threshold: "
+                    f"{graph_coverage!r} < {minimum}"
+                )
+            observed_components = {
+                component.get("scope") for component in graph_map.get("components", [])
+            }
+            missing_components = sorted(graph_required_scopes - observed_components)
+            if missing_components:
+                errors.append(
+                    "graph map is missing architectural components: "
+                    + ", ".join(missing_components)
+                )
+    else:
+        kernel_coverage = report["coverage"].get("kernel_duration_attribution_ratio")
+        minimum = max(
+            contract.get("minimum_kernel_duration_attribution", 0.0)
+            for contract in contracts
+        )
+        if kernel_coverage is None or kernel_coverage < minimum:
+            errors.append(
+                "kernel duration attribution below threshold: "
+                f"{kernel_coverage!r} < {minimum}"
+            )
+
+    return {
+        "status": "failed" if errors else "passed",
+        "errors": errors,
+        "required_implementation_scopes": sorted(required_scopes),
+        "graph_required_scopes": sorted(graph_required_scopes),
+        "evidence": "nsight_graph_map" if graph_used else "kineto_external_ids",
+    }
+
+
 def _scope_invocations(cpu_events, scope_metadata, warnings):
     invocations = []
     invocation_id = 0
@@ -937,11 +1161,15 @@ def _group_scope_metrics(invocations, committed, implementation_ids):
             invocation.name,
             manifest.get("rank_label", "unknown"),
             metadata.get("batch_bucket", "unknown"),
+            metadata.get("worker", "unknown"),
+            metadata.get("forward_mode", "unknown"),
         )
         grouped[key].append((manifest, invocation))
 
     rows = []
-    for (scope, rank_label, bucket), values in sorted(grouped.items()):
+    for (scope, rank_label, bucket, worker, forward_mode), values in sorted(
+        grouped.items()
+    ):
         all_events = [event for _, inv in values for event in inv.gpu_events]
         exclusive_events = [
             event for _, inv in values for event in inv.exclusive_gpu_events
@@ -978,6 +1206,8 @@ def _group_scope_metrics(invocations, committed, implementation_ids):
                 "scope": scope,
                 "rank_label": rank_label,
                 "batch_bucket": bucket,
+                "worker": worker,
+                "forward_mode": forward_mode,
                 "invocations": len(values),
                 "committed_tokens": committed_tokens,
                 "gpu_elapsed_ms": elapsed_us / 1000.0,
@@ -1000,7 +1230,50 @@ def _group_scope_metrics(invocations, committed, implementation_ids):
                 ],
             }
         )
+    hotloops = {
+        (
+            row["rank_label"],
+            row["batch_bucket"],
+            row["worker"],
+            row["forward_mode"],
+            row["scope"],
+        ): row
+        for row in rows
+        if row["scope"].startswith(("runtime.", "spec."))
+    }
+    for row in rows:
+        hotloop_scope = _hotloop_scope(row["forward_mode"])
+        hotloop = hotloops.get(
+            (
+                row["rank_label"],
+                row["batch_bucket"],
+                row["worker"],
+                row["forward_mode"],
+                hotloop_scope,
+            )
+        )
+        denominator = hotloop["gpu_elapsed_ms"] if hotloop else None
+        row["hotloop_scope"] = hotloop_scope if hotloop else None
+        row["hotloop_gpu_elapsed_ms"] = denominator
+        row["percent_of_hotloop_gpu_elapsed"] = (
+            100.0 * row["exclusive_gpu_elapsed_ms"] / denominator
+            if denominator
+            else None
+        )
     return rows
+
+
+def _hotloop_scope(forward_mode: Any) -> str:
+    mode = str(forward_mode).lower()
+    if "target_verify" in mode:
+        return "spec.verify"
+    if "draft_extend" in mode:
+        return "spec.draft_extend"
+    if "prefill" in mode or "extend" in mode:
+        return "runtime.prefill"
+    if "decode" in mode:
+        return "runtime.decode"
+    return "runtime.other"
 
 
 def _implementation_ids_by_rank_scope(records):
@@ -1119,8 +1392,14 @@ def _divide(numerator: float, denominator: int) -> float | None:
 
 def _markdown_report(report: dict[str, Any]) -> str:
     coverage = report["coverage"]
-    ratio = coverage["gpu_event_attribution_ratio"]
-    ratio_text = "n/a" if ratio is None else f"{ratio:.1%}"
+    event_ratio = coverage["kernel_event_attribution_ratio"]
+    duration_ratio = coverage["kernel_duration_attribution_ratio"]
+    annotation_ratio = coverage["gpu_annotation_event_attribution_ratio"]
+    event_ratio_text = "n/a" if event_ratio is None else f"{event_ratio:.1%}"
+    duration_ratio_text = "n/a" if duration_ratio is None else f"{duration_ratio:.1%}"
+    annotation_ratio_text = (
+        "n/a" if annotation_ratio is None else f"{annotation_ratio:.1%}"
+    )
     distributed = report["distributed_steps"]
     distributed_text = (
         "Distributed step spans use paired single-host monotonic clock markers."
@@ -1134,22 +1413,26 @@ def _markdown_report(report: dict[str, Any]) -> str:
         "work may overlap and is never presented as wall-clock latency. "
         + distributed_text,
         "",
-        f"GPU event attribution coverage: {ratio_text}. Committed tokens: "
+        "Coverage: "
+        f"kernel events {event_ratio_text}; kernel duration {duration_ratio_text}; "
+        f"GPU annotations {annotation_ratio_text}. Committed tokens: "
         f"{report['normalization']['committed_tokens']}.",
+        f"Validation: {report['validation']['status']}.",
         "",
-        "| Scope | Rank | Batch bucket | GPU elapsed ms | Exclusive GPU ms | Summed work ms | "
+        "| Scope | Rank | Batch bucket | GPU elapsed ms | Exclusive GPU ms | % hotloop | Summed work ms | "
         "Service ms/committed token | Request-weighted ms/committed token |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in report["rank_bucket_scopes"]:
         lines.append(
-            "| {scope} | {rank} | {bucket} | {elapsed:.3f} | {exclusive:.3f} | {work:.3f} | "
+            "| {scope} | {rank} | {bucket} | {elapsed:.3f} | {exclusive:.3f} | {percent} | {work:.3f} | "
             "{service} | {weighted} |".format(
                 scope=row["scope"],
                 rank=row["rank_label"],
                 bucket=row["batch_bucket"],
                 elapsed=row["gpu_elapsed_ms"],
                 exclusive=row["exclusive_gpu_elapsed_ms"],
+                percent=_format_percent(row["percent_of_hotloop_gpu_elapsed"]),
                 work=row["summed_gpu_work_ms"],
                 service=_format_optional(row["gpu_service_ms_per_committed_token"]),
                 weighted=_format_optional(
@@ -1211,6 +1494,10 @@ def _format_optional(value: float | None) -> str:
     return "n/a" if value is None or not math.isfinite(value) else f"{value:.4f}"
 
 
+def _format_percent(value: float | None) -> str:
+    return "n/a" if value is None or not math.isfinite(value) else f"{value:.1f}%"
+
+
 def _safe_output_stem(profile_id: str) -> str:
     stem = "".join(
         character if character.isalnum() or character in "-_." else "_"
@@ -1230,9 +1517,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--output-dir", help="Report destination; defaults to profile_dir"
     )
+    parser.add_argument(
+        "--graph-map", help="Nsight graph map JSON for CUDA-graph profiles"
+    )
+    parser.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help="write a preliminary report even when its model contract fails",
+    )
     args = parser.parse_args(argv)
     json_path, markdown_path = write_profile_report(
-        args.profile_dir, profile_id=args.profile_id, output_dir=args.output_dir
+        args.profile_dir,
+        profile_id=args.profile_id,
+        output_dir=args.output_dir,
+        graph_map_path=args.graph_map,
+        strict=not args.allow_incomplete,
     )
     print(json_path)
     print(markdown_path)

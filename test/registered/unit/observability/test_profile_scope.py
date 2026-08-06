@@ -6,11 +6,14 @@ from unittest.mock import patch
 
 from sglang.srt.distributed.parallel_state_wrapper import ParallelState
 from sglang.srt.observability.profile_scope import (
+    _clear_profile_registrations_for_test,
     batch_bucket,
     profile_collective_scope,
     profile_scope,
     record_profile_impl,
     record_profile_step,
+    register_profile_contract,
+    register_profile_impl,
     start_profile_recording,
     stop_profile_recording,
 )
@@ -26,6 +29,7 @@ def _source_for_profile_test():
 class TestProfileScope(unittest.TestCase):
     def tearDown(self):
         stop_profile_recording()
+        _clear_profile_registrations_for_test()
 
     def test_batch_bucket(self):
         self.assertEqual(batch_bucket(0), "0")
@@ -86,6 +90,40 @@ class TestProfileScope(unittest.TestCase):
             )
             with self.assertRaises(TypeError):
                 record_profile_step("bad", tensor=object())
+
+    @patch("sglang.srt.observability.profile_scope.profile_range")
+    def test_component_scope_inherits_hotloop_dimensions(self, mock_profile_range):
+        mock_profile_range.return_value.__enter__.return_value = None
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            start_profile_recording(
+                output_dir=temporary_dir,
+                profile_id="run",
+                profile_prefix="",
+                stage="decode",
+                ps=ParallelState.trivial(),
+            )
+            with profile_scope(
+                "runtime.decode",
+                scheduler_iteration=4,
+                worker="target",
+                forward_mode="decode",
+                batch_size=12,
+                batch_bucket="9-16",
+            ):
+                with profile_scope("model.attention.mla", layer=3):
+                    pass
+            path = stop_profile_recording()
+            records = [json.loads(line) for line in Path(path).read_text().splitlines()]
+
+        component = next(
+            record
+            for record in records
+            if record.get("event") == "scope_start"
+            and record.get("scope") == "model.attention.mla"
+        )
+        self.assertEqual(component["scheduler_iteration"], 4)
+        self.assertEqual(component["batch_bucket"], "9-16")
+        self.assertEqual(component["worker"], "target")
 
     @patch("sglang.srt.observability.profile_scope.profile_range")
     def test_records_collective_sequence_and_bytes(self, mock_profile_range):
@@ -158,6 +196,45 @@ class TestProfileScope(unittest.TestCase):
             self.assertEqual(len(implementations), 1)
             self.assertEqual(implementations[0]["implementation"], "test_kernel")
             self.assertTrue(implementations[0]["sources"][0]["git_blob"])
+
+    def test_flushes_dispatch_and_contract_registered_before_profile(self):
+        register_profile_impl(
+            "model.attention.mla",
+            "test.mla",
+            source_objects=(_source_for_profile_test,),
+            expected_symbols=("mla_kernel",),
+            conditions={"backend": "test"},
+        )
+        register_profile_contract(
+            "future_model",
+            "FutureModelForCausalLM",
+            required_implementation_scopes=("model.attention.mla",),
+            graph_required_scopes=("model.attention.mla",),
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            start_profile_recording(
+                output_dir=temporary_dir,
+                profile_id="run",
+                profile_prefix="",
+                stage="decode",
+                ps=ParallelState.trivial(),
+            )
+            path = stop_profile_recording()
+            records = [json.loads(line) for line in Path(path).read_text().splitlines()]
+
+        implementation = next(
+            record for record in records if record["event"] == "implementation"
+        )
+        contract = next(
+            record for record in records if record["event"] == "profile_contract"
+        )
+        self.assertEqual(
+            implementation["declaration_lifecycle"], "registered_before_profile"
+        )
+        self.assertTrue(implementation["sources"][0]["sha256"])
+        self.assertEqual(contract["model_family"], "future_model")
+        self.assertEqual(contract["graph_required_scopes"], ["model.attention.mla"])
 
 
 if __name__ == "__main__":

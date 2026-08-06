@@ -141,6 +141,11 @@ from sglang.srt.models.deepseek_v2 import (
     _is_npu,
     _is_xpu,
 )
+from sglang.srt.observability.profile_scope import (
+    profile_scope,
+    register_profile_contract,
+    register_profile_impl,
+)
 from sglang.srt.runtime_context import get_device, get_exec, get_forward, get_parallel
 
 if not _is_hip:
@@ -1478,6 +1483,29 @@ class DeepseekV4DecoderLayer(nn.Module):
         norm: Optional[nn.Module] = None,
         forward_batch: Optional[ForwardBatch] = None,
     ):
+        with profile_scope(
+            "model.residual.mhc",
+            layer=self.layer_id,
+            operation="pre",
+        ):
+            return self._hc_pre_impl(
+                x,
+                hc_fn,
+                hc_scale,
+                hc_base,
+                norm=norm,
+                forward_batch=forward_batch,
+            )
+
+    def _hc_pre_impl(
+        self,
+        x: torch.Tensor,
+        hc_fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        norm: Optional[nn.Module] = None,
+        forward_batch: Optional[ForwardBatch] = None,
+    ):
         """If *norm* is given and the TileLang path is active, the returned
         hidden_states are already post-norm (the norm is fused into the kernel)."""
 
@@ -1597,6 +1625,20 @@ class DeepseekV4DecoderLayer(nn.Module):
         post: torch.Tensor,
         comb: torch.Tensor,
     ):
+        with profile_scope(
+            "model.residual.mhc",
+            layer=self.layer_id,
+            operation="post",
+        ):
+            return self._hc_post_impl(x, residual, post, comb)
+
+    def _hc_post_impl(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+    ):
 
         if x.shape[0] == 0:
             return torch.empty(
@@ -1631,6 +1673,14 @@ class DeepseekV4DecoderLayer(nn.Module):
 
         return hc_post_torch_impl(x, residual, post, comb)
 
+    def _mhc_fused_post_pre(self, *args, **kwargs):
+        with profile_scope(
+            "model.residual.mhc",
+            layer=self.layer_id,
+            operation="fused_post_pre",
+        ):
+            return _get_mhc_ops().mhc_fused_post_pre(*args, **kwargs)
+
     def forward(
         self,
         positions: torch.tensor,
@@ -1650,7 +1700,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         use_fused = self.use_fused_mhc_post_pre
 
         if prev_residual is not None and use_fused:
-            residual, post, comb, hidden_states = _get_mhc_ops().mhc_fused_post_pre(
+            residual, post, comb, hidden_states = self._mhc_fused_post_pre(
                 hidden_states,
                 prev_residual,
                 prev_post,
@@ -1703,25 +1753,30 @@ class DeepseekV4DecoderLayer(nn.Module):
             )
 
         if use_fused:
-            fused_mhc = try_fused_hc_post_pre(
-                hidden_states,
-                residual,
-                post,
-                comb,
-                self.hc_ffn_fn.T,
-                self.hc_ffn_scale,
-                self.hc_ffn_base,
-                self.hc_mult,
-                self.rms_norm_eps,
-                self.hc_eps,
-                _MHC_POST_MULT_VALUE,
-                self.hc_sinkhorn_iters,
-                _is_gfx95_supported,
-            )
+            with profile_scope(
+                "model.residual.mhc",
+                layer=self.layer_id,
+                operation="fused_post_pre",
+            ):
+                fused_mhc = try_fused_hc_post_pre(
+                    hidden_states,
+                    residual,
+                    post,
+                    comb,
+                    self.hc_ffn_fn.T,
+                    self.hc_ffn_scale,
+                    self.hc_ffn_base,
+                    self.hc_mult,
+                    self.rms_norm_eps,
+                    self.hc_eps,
+                    _MHC_POST_MULT_VALUE,
+                    self.hc_sinkhorn_iters,
+                    _is_gfx95_supported,
+                )
             if fused_mhc is not None:
                 residual, hidden_states, post, comb, norm_fused = fused_mhc
             else:
-                residual, post, comb, hidden_states = _get_mhc_ops().mhc_fused_post_pre(
+                residual, post, comb, hidden_states = self._mhc_fused_post_pre(
                     hidden_states,
                     residual,
                     post.unsqueeze(-1) if post.ndim == 2 else post,
@@ -2534,6 +2589,63 @@ class DeepseekV4ForCausalLM(nn.Module):
         # mid-serving (RL refit sends many partial batches); the prewarm and
         # its barrier must only run on the first (startup) load.
         self._mhc_prewarmed_at_load = False
+        self._register_profile_contract()
+
+    def _register_profile_contract(self) -> None:
+        architecture = (
+            self.config.architectures[0]
+            if getattr(self.config, "architectures", None)
+            else type(self).__name__
+        )
+        component_scopes = (
+            "model.attention.indexer",
+            "model.attention.compressor",
+            "model.attention.mla",
+            "model.moe.router",
+            "model.moe.experts",
+            "model.residual.mhc",
+        )
+        register_profile_contract(
+            "deepseek_v4",
+            architecture,
+            required_implementation_scopes=component_scopes,
+            graph_required_scopes=tuple(
+                scope for scope in component_scopes if scope != "model.moe.router"
+            ),
+            minimum_kernel_duration_attribution=0.8,
+            minimum_graph_duration_attribution=0.8,
+        )
+
+        if _is_fused_mhc_post_pre_enabled():
+            implementation = "sglang.tilelang.mhc_fused_post_pre"
+        elif (
+            envs.SGLANG_OPT_USE_TILELANG_MHC_PRE.get()
+            or envs.SGLANG_OPT_USE_TILELANG_MHC_POST.get()
+        ):
+            implementation = "sglang.tilelang.mhc"
+        elif _is_hip and (
+            envs.SGLANG_OPT_USE_AITER_MHC_PRE.get()
+            or envs.SGLANG_OPT_USE_AITER_MHC_POST.get()
+        ):
+            implementation = "aiter.mhc"
+        elif _is_npu:
+            implementation = "torch_npu.mhc"
+        else:
+            implementation = "sglang.torch_mhc"
+        register_profile_impl(
+            "model.residual.mhc",
+            implementation,
+            source_files=(
+                __file__,
+                "python/sglang/kernels/ops/layernorm/mhc.py",
+            ),
+            expected_symbols=("mhc_pre", "mhc_post", "mhc_fused_post_pre"),
+            loaded_modules=("sglang", "tilelang", "aiter", "torch_npu"),
+            conditions={
+                "architecture": "deepseek_v4",
+                "fused_post_pre": _is_fused_mhc_post_pre_enabled(),
+            },
+        )
 
     @property
     def routed_experts_weights_of_layer(self):

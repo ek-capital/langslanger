@@ -187,7 +187,11 @@ from sglang.srt.models.deepseek_common.utils import (
     _use_aiter_gfx95,
     is_wint4afp8_or_wint4a16_config,
 )
-from sglang.srt.observability.profile_scope import record_profile_impl
+from sglang.srt.observability.profile_scope import (
+    profile_scope,
+    record_profile_impl,
+    register_profile_impl,
+)
 from sglang.srt.runtime_context import (
     get_device,
     get_exec,
@@ -600,6 +604,7 @@ class DeepseekV2MoE(nn.Module):
         self.layer_id = layer_id
         self.alt_stream = alt_stream
         self.is_nextn = is_nextn
+        self.is_deepseek_v4 = is_deepseek_v4
 
         n_hash_layers = getattr(config, "num_hash_layers", 0)
         self.is_hash = layer_id < n_hash_layers and not (is_deepseek_v4 and is_nextn)
@@ -839,6 +844,22 @@ class DeepseekV2MoE(nn.Module):
         # SGLANG_OPT_MOE_QUANT_ONCE eligibility, resolved lazily on first
         # forward (weights and runner are final by then). None = undecided.
         self._moe_quant_once: Optional[bool] = None
+        register_profile_impl(
+            "model.moe.router",
+            f"{type(self.topk).__module__}.{type(self.topk).__qualname__}",
+            source_objects=(type(self.gate), type(self.topk)),
+            expected_symbols=("router", "topk", "grouped_topk"),
+            loaded_modules=("sglang", "sgl_kernel"),
+            conditions={
+                "architecture": (
+                    "deepseek_v4"
+                    if is_deepseek_v4
+                    else getattr(config, "model_type", "deepseek_v2")
+                ),
+                "hash_routing": self.is_hash,
+                "top_k": self.top_k,
+            },
+        )
 
     def get_moe_weights(self):
         # EPLB only rebalances physical routed experts. Fused shared expert
@@ -877,6 +898,29 @@ class DeepseekV2MoE(nn.Module):
         )
 
     def forward(
+        self,
+        hidden_states: torch.Tensor,
+        forward_batch: Optional[ForwardBatch] = None,
+        gemm_output_zero_allocator: BumpAllocator = None,
+        input_ids: Optional[torch.Tensor] = None,
+        input_ids_global: Optional[torch.Tensor] = None,
+        skip_shared_experts: bool = False,
+    ) -> torch.Tensor:
+        with profile_scope(
+            "model.moe",
+            layer=self.layer_id,
+            architecture=("deepseek_v4" if self.is_deepseek_v4 else "deepseek_v2"),
+        ):
+            return self._forward_impl(
+                hidden_states=hidden_states,
+                forward_batch=forward_batch,
+                gemm_output_zero_allocator=gemm_output_zero_allocator,
+                input_ids=input_ids,
+                input_ids_global=input_ids_global,
+                skip_shared_experts=skip_shared_experts,
+            )
+
+    def _forward_impl(
         self,
         hidden_states: torch.Tensor,
         forward_batch: Optional[ForwardBatch] = None,
@@ -968,43 +1012,49 @@ class DeepseekV2MoE(nn.Module):
             else None
         )
         # router_logits: (num_tokens, n_experts)
-        router_logits = self.gate(hidden_states, gemm_output_zero_allocator)
-        if use_flashinfer_trtllm_bypass:
-            topk_output = BypassedTopKOutput(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                topk_config=self.topk.topk_config,
-            )
-        else:
-            topk_kwargs = (
-                {"input_ids": input_ids_global}
-                if getattr(self, "is_hash", False)
-                else {}
-            )
-            topk_output = self.topk(
-                hidden_states,
-                router_logits,
-                expert_location_dispatch_info=dispatch_info,
-                **topk_kwargs,
-            )
+        with profile_scope("model.moe.router", layer=self.layer_id, operation="route"):
+            router_logits = self.gate(hidden_states, gemm_output_zero_allocator)
+            if use_flashinfer_trtllm_bypass:
+                topk_output = BypassedTopKOutput(
+                    hidden_states=hidden_states,
+                    router_logits=router_logits,
+                    topk_config=self.topk.topk_config,
+                )
+            else:
+                topk_kwargs = (
+                    {"input_ids": input_ids_global}
+                    if getattr(self, "is_hash", False)
+                    else {}
+                )
+                topk_output = self.topk(
+                    hidden_states,
+                    router_logits,
+                    expert_location_dispatch_info=dispatch_info,
+                    **topk_kwargs,
+                )
         deferred_finalize = (
             has_shared_output
             and not self._shared_expert_tp1
             and topk_output.format == TopKOutputFormat.BYPASSED
             and self.experts.supports_deferred_finalize
         )
-        if deferred_finalize:
-            final_hidden_states = self.experts.forward_deferred_finalize(
-                hidden_states, topk_output
-            )
-        elif use_flashinfer_trtllm_bypass:
-            final_hidden_states = self.experts.forward_impl(hidden_states, topk_output)
-        elif pre_quant_input is not None:
-            final_hidden_states = self.experts(
-                hidden_states, topk_output, pre_quant_input=pre_quant_input
-            )
-        else:
-            final_hidden_states = self.experts(hidden_states, topk_output)
+        with profile_scope(
+            "model.moe.experts", layer=self.layer_id, operation="routed"
+        ):
+            if deferred_finalize:
+                final_hidden_states = self.experts.forward_deferred_finalize(
+                    hidden_states, topk_output
+                )
+            elif use_flashinfer_trtllm_bypass:
+                final_hidden_states = self.experts.forward_impl(
+                    hidden_states, topk_output
+                )
+            elif pre_quant_input is not None:
+                final_hidden_states = self.experts(
+                    hidden_states, topk_output, pre_quant_input=pre_quant_input
+                )
+            else:
+                final_hidden_states = self.experts(hidden_states, topk_output)
         if (
             not _is_cuda
             and not _is_musa
@@ -1092,18 +1142,21 @@ class DeepseekV2MoE(nn.Module):
                     pre_quant_input=pre_quant_input,
                 )
             # router_logits: (num_tokens, n_experts)
-            router_logits = self.gate(hidden_states, gemm_output_zero_allocator)
-            topk_kwargs = (
-                {"input_ids": input_ids_global}
-                if getattr(self, "is_hash", False)
-                else {}
-            )
-            topk_output = self.topk(
-                hidden_states,
-                router_logits,
-                expert_location_dispatch_info=dispatch_info,
-                **topk_kwargs,
-            )
+            with profile_scope(
+                "model.moe.router", layer=self.layer_id, operation="route"
+            ):
+                router_logits = self.gate(hidden_states, gemm_output_zero_allocator)
+                topk_kwargs = (
+                    {"input_ids": input_ids_global}
+                    if getattr(self, "is_hash", False)
+                    else {}
+                )
+                topk_output = self.topk(
+                    hidden_states,
+                    router_logits,
+                    expert_location_dispatch_info=dispatch_info,
+                    **topk_kwargs,
+                )
         else:
             pre_quant_input = None
             shared_output = None
@@ -1141,17 +1194,20 @@ class DeepseekV2MoE(nn.Module):
                 self.experts.dispatcher.register_post_combine_hook(_post_combine_hook)
             )
 
-        if pre_quant_input is not None:
-            final_hidden_states = self.experts(
-                hidden_states,
-                topk_output,
-                pre_quant_input=pre_quant_input,
-            )
-        else:
-            final_hidden_states = self.experts(
-                hidden_states,
-                topk_output,
-            )
+        with profile_scope(
+            "model.moe.experts", layer=self.layer_id, operation="routed"
+        ):
+            if pre_quant_input is not None:
+                final_hidden_states = self.experts(
+                    hidden_states,
+                    topk_output,
+                    pre_quant_input=pre_quant_input,
+                )
+            else:
+                final_hidden_states = self.experts(
+                    hidden_states,
+                    topk_output,
+                )
         if (
             not _is_cuda
             and not _is_musa
@@ -1263,7 +1319,10 @@ class DeepseekV2MoE(nn.Module):
 
         if hidden_states.shape[0] > 0:
             # router_logits: (num_tokens, n_experts)
-            router_logits = self.gate(hidden_states, forward_batch=forward_batch)
+            with profile_scope(
+                "model.moe.router", layer=self.layer_id, operation="route"
+            ):
+                router_logits = self.gate(hidden_states, forward_batch=forward_batch)
             if not sbo_enabled_flag and self.num_fused_shared_experts == 0:
                 if self.alt_stream is not None:
                     self.alt_stream.wait_stream(torch.cuda.current_stream())
@@ -1285,19 +1344,22 @@ class DeepseekV2MoE(nn.Module):
                 if getattr(self, "is_hash", False)
                 else {}
             )
-            topk_output = self.topk(
-                hidden_states,
-                router_logits,
-                num_token_non_padded=forward_batch.num_token_non_padded,
-                expert_location_dispatch_info=(
-                    ExpertLocationDispatchInfo.init_new(
-                        layer_id=self.layer_id,
-                    )
-                    if not self.is_nextn
-                    else None
-                ),
-                **topk_kwargs,
-            )
+            with profile_scope(
+                "model.moe.router", layer=self.layer_id, operation="topk"
+            ):
+                topk_output = self.topk(
+                    hidden_states,
+                    router_logits,
+                    num_token_non_padded=forward_batch.num_token_non_padded,
+                    expert_location_dispatch_info=(
+                        ExpertLocationDispatchInfo.init_new(
+                            layer_id=self.layer_id,
+                        )
+                        if not self.is_nextn
+                        else None
+                    ),
+                    **topk_kwargs,
+                )
         else:
             topk_output = self.topk.empty_topk_output(
                 hidden_states.device, layer_id=self.layer_id
@@ -1451,10 +1513,13 @@ class DeepseekV2MoE(nn.Module):
                 self.experts.dispatcher.register_post_combine_hook(_post_combine_hook)
             )
 
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states,
-            topk_output=topk_output,
-        )
+        with profile_scope(
+            "model.moe.experts", layer=self.layer_id, operation="routed"
+        ):
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states,
+                topk_output=topk_output,
+            )
 
         if (
             hidden_states.shape[0] > 0
@@ -1483,6 +1548,21 @@ class DeepseekV2MoE(nn.Module):
         return final_hidden_states
 
     def _forward_shared_experts(
+        self,
+        hidden_states,
+        gemm_output_zero_allocator: BumpAllocator = None,
+        pre_quant_input: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    ):
+        with profile_scope(
+            "model.moe.shared_experts", layer=self.layer_id, operation="shared"
+        ):
+            return self._forward_shared_experts_impl(
+                hidden_states,
+                gemm_output_zero_allocator=gemm_output_zero_allocator,
+                pre_quant_input=pre_quant_input,
+            )
+
+    def _forward_shared_experts_impl(
         self,
         hidden_states,
         gemm_output_zero_allocator: BumpAllocator = None,

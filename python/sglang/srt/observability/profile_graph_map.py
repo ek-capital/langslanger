@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-GRAPH_MAP_SCHEMA_VERSION = 1
+GRAPH_MAP_SCHEMA_VERSION = 2
 _KERNEL_TABLE = "CUPTI_ACTIVITY_KIND_KERNEL"
 _NODE_TABLE = "CUDA_GRAPH_NODE_EVENTS"
 _STRING_TABLE = "StringIds"
@@ -104,24 +104,37 @@ def analyze_graph_sqlite(
             0: "unresolved",
             1: "single_candidate",
         }.get(len(source_candidates), "ambiguous")
-        nodes.append(
-            {
-                "global_pid": global_pid,
-                "graph_id": graph_id,
-                "canonical_graph_node_id": canonical_node_id,
-                "observed_graph_node_ids": sorted(observed_node_ids),
-                "kernel_occurrences": len(values),
-                "summed_kernel_ms": sum(kernel["duration_ns"] for kernel in values)
-                / 1e6,
-                "symbols": symbol_rows,
-                "device_ids": sorted(devices),
-                "context_ids": sorted(contexts),
-                "stream_ids": sorted(streams),
-                "launch_shapes": sorted(launch_shapes),
-                "source_mapping_status": source_mapping_status,
-                "source_candidates": source_candidates,
-            }
-        )
+        node = {
+            "global_pid": global_pid,
+            "rank_label": _rank_for_global_pid(global_pid, report),
+            "graph_id": graph_id,
+            "canonical_graph_node_id": canonical_node_id,
+            "observed_graph_node_ids": sorted(observed_node_ids),
+            "kernel_occurrences": len(values),
+            "summed_kernel_ms": sum(kernel["duration_ns"] for kernel in values) / 1e6,
+            "_kernel_intervals": [
+                (
+                    (kernel.get("global_pid"), kernel.get("device_id")),
+                    kernel["start_ns"],
+                    kernel["start_ns"] + kernel["duration_ns"],
+                )
+                for kernel in values
+            ],
+            "symbols": symbol_rows,
+            "device_ids": sorted(devices),
+            "context_ids": sorted(contexts),
+            "stream_ids": sorted(streams),
+            "launch_shapes": sorted(launch_shapes),
+            "source_mapping_status": source_mapping_status,
+            "source_candidates": source_candidates,
+        }
+        if len(source_candidates) == 1:
+            node["resolved_scope"] = source_candidates[0]["scope"]
+            node["resolved_implementation"] = source_candidates[0]["implementation"]
+        else:
+            node["resolved_scope"] = None
+            node["resolved_implementation"] = None
+        nodes.append(node)
 
     warnings = []
     if not groups:
@@ -138,7 +151,29 @@ def analyze_graph_sqlite(
             "no LangSlanger profile report supplied; source candidates are unavailable"
         )
 
-    return {
+    graph_kernel_ms = sum(node["summed_kernel_ms"] for node in nodes)
+    resolved_graph_kernel_ms = sum(
+        node["summed_kernel_ms"]
+        for node in nodes
+        if node["source_mapping_status"] == "single_candidate"
+    )
+    graph_nonoverlap_ms = (
+        _interval_union_by_lane(
+            interval for node in nodes for interval in node["_kernel_intervals"]
+        )
+        / 1e6
+    )
+    interval_partition = _partition_intervals_by_scope(nodes)
+    resolved_graph_nonoverlap_ms = interval_partition["resolved_ns"] / 1e6
+    components = _component_report(
+        nodes,
+        graph_kernel_ms,
+        graph_nonoverlap_ms,
+        interval_partition["exclusive_scope_ns"],
+    )
+    for node in nodes:
+        node.pop("_kernel_intervals", None)
+    result = {
         "schema_version": GRAPH_MAP_SCHEMA_VERSION,
         "timing_authority": "supplemental_nsight_kernel_activity",
         "authoritative_serving_timing": False,
@@ -155,10 +190,31 @@ def analyze_graph_sqlite(
             "graph_kernel_rows": len(kernels) - kernels_without_graph_node,
             "kernels_without_graph_node": kernels_without_graph_node,
             "canonical_graph_nodes": len(nodes),
+            "resolved_graph_nodes": sum(
+                node["source_mapping_status"] == "single_candidate" for node in nodes
+            ),
+            "summed_graph_kernel_ms": graph_kernel_ms,
+            "resolved_graph_kernel_ms": resolved_graph_kernel_ms,
+            "nonoverlap_graph_kernel_ms": graph_nonoverlap_ms,
+            "resolved_nonoverlap_graph_kernel_ms": resolved_graph_nonoverlap_ms,
+            "cross_component_overlap_ms": (
+                interval_partition["cross_component_overlap_ns"] / 1e6
+            ),
+            "unresolved_nonoverlap_graph_kernel_ms": (
+                interval_partition["unresolved_ns"] / 1e6
+            ),
+            "graph_duration_attribution_ratio": (
+                resolved_graph_nonoverlap_ms / graph_nonoverlap_ms
+                if graph_nonoverlap_ms
+                else None
+            ),
         },
+        "components": components,
         "graph_nodes": nodes,
         "warnings": warnings,
     }
+    result["validation"] = _validate_graph_map(result, report)
+    return result
 
 
 def write_graph_map(
@@ -166,9 +222,18 @@ def write_graph_map(
     *,
     profile_report_path: str | Path | None = None,
     output_path: str | Path | None = None,
+    strict: bool = True,
 ) -> Path:
-    result = analyze_graph_sqlite(sqlite_path, profile_report_path)
     sqlite_path = Path(sqlite_path).expanduser().resolve()
+    if sqlite_path.name.endswith(".nsys-rep"):
+        from sglang.srt.observability.profile_nsys import export_nsys_sqlite
+
+        sqlite_path = export_nsys_sqlite(sqlite_path)
+    result = analyze_graph_sqlite(sqlite_path, profile_report_path)
+    if strict and result["validation"]["status"] == "failed":
+        raise ValueError(
+            "graph map validation failed: " + "; ".join(result["validation"]["errors"])
+        )
     output_path = (
         Path(output_path).expanduser().resolve()
         if output_path
@@ -309,7 +374,7 @@ def _canonical_node_id(node_id: int, originals: dict[int, int]) -> int:
 def _source_candidates(symbol_rows, report):
     if report is None:
         return []
-    candidates = []
+    candidates = {}
     symbols = [row["symbol"] for row in symbol_rows]
     for implementation in report.get("implementations", []):
         fragments = [
@@ -324,23 +389,296 @@ def _source_candidates(symbol_rows, report):
         )
         if not matching:
             continue
-        candidates.append(
+        candidate = {
+            "implementation_ids": [implementation.get("implementation_id")],
+            "implementation_id": implementation.get("implementation_id"),
+            "implementation": implementation.get("implementation"),
+            "scope": implementation.get("scope"),
+            "match_basis": "expected_symbol_fragment",
+            "matching_symbols": matching,
+            "sources": implementation.get("sources", []),
+            "cuda_sources": [
+                source
+                for source in implementation.get("sources", [])
+                if Path(source.get("path", "")).suffix in {".cu", ".cuh"}
+            ],
+            "loaded_libraries": implementation.get("loaded_libraries", []),
+        }
+        # Target/draft workers and ranks may declare the same implementation
+        # with different runtime conditions.  They are one source candidate,
+        # not an ambiguity in the graph-node join.
+        key = json.dumps(
             {
-                "implementation_id": implementation.get("implementation_id"),
-                "implementation": implementation.get("implementation"),
-                "scope": implementation.get("scope"),
-                "match_basis": "expected_symbol_fragment",
-                "matching_symbols": matching,
-                "sources": implementation.get("sources", []),
-                "cuda_sources": [
+                "implementation": candidate["implementation"],
+                "scope": candidate["scope"],
+                "sources": candidate["sources"],
+                "loaded_libraries": candidate["loaded_libraries"],
+            },
+            sort_keys=True,
+        )
+        if key in candidates:
+            candidates[key]["implementation_ids"] = sorted(
+                set(candidates[key]["implementation_ids"])
+                | set(candidate["implementation_ids"])
+            )
+            candidates[key]["matching_symbols"] = sorted(
+                set(candidates[key]["matching_symbols"])
+                | set(candidate["matching_symbols"])
+            )
+        else:
+            candidates[key] = candidate
+    return [candidates[key] for key in sorted(candidates)]
+
+
+def _component_report(
+    nodes: list[dict[str, Any]],
+    total_graph_kernel_ms: float,
+    total_graph_nonoverlap_ms: float,
+    exclusive_scope_ns: dict[str, int],
+) -> list[dict[str, Any]]:
+    rank_totals = defaultdict(float)
+    rank_nodes = defaultdict(list)
+    for node in nodes:
+        rank = node.get("rank_label") or f"pid:{node.get('global_pid')}"
+        rank_totals[rank] += node["summed_kernel_ms"]
+        rank_nodes[rank].append(node)
+    rank_nonoverlap_totals = {
+        rank: _interval_union_by_lane(
+            interval for node in values for interval in node["_kernel_intervals"]
+        )
+        / 1e6
+        for rank, values in rank_nodes.items()
+    }
+    rank_partitions = {
+        rank: _partition_intervals_by_scope(values)
+        for rank, values in rank_nodes.items()
+    }
+    grouped = defaultdict(list)
+    for node in nodes:
+        if node["resolved_scope"] is not None:
+            grouped[node["resolved_scope"]].append(node)
+    components = []
+    for scope, scope_nodes in sorted(grouped.items()):
+        summed_ms = sum(node["summed_kernel_ms"] for node in scope_nodes)
+        nonoverlap_ms = (
+            _interval_union_by_lane(
+                interval
+                for node in scope_nodes
+                for interval in node["_kernel_intervals"]
+            )
+            / 1e6
+        )
+        exclusive_nonoverlap_ms = exclusive_scope_ns.get(scope, 0) / 1e6
+        candidates = [node["source_candidates"][0] for node in scope_nodes]
+        rank_work = defaultdict(float)
+        component_rank_nodes = defaultdict(list)
+        for node in scope_nodes:
+            rank = node.get("rank_label") or f"pid:{node.get('global_pid')}"
+            rank_work[rank] += node["summed_kernel_ms"]
+            component_rank_nodes[rank].append(node)
+        rank_rows = []
+        for rank, duration in sorted(rank_work.items()):
+            interval_union_ms = (
+                _interval_union_by_lane(
+                    interval
+                    for node in component_rank_nodes[rank]
+                    for interval in node["_kernel_intervals"]
+                )
+                / 1e6
+            )
+            exclusive_ms = (
+                rank_partitions[rank]["exclusive_scope_ns"].get(scope, 0) / 1e6
+            )
+            rank_rows.append(
+                {
+                    "rank_label": rank,
+                    "summed_kernel_ms": duration,
+                    "interval_union_kernel_ms": interval_union_ms,
+                    "exclusive_nonoverlap_kernel_ms": exclusive_ms,
+                    "percent_of_rank_graph_kernel_work": (
+                        100.0 * duration / rank_totals[rank]
+                        if rank_totals[rank]
+                        else None
+                    ),
+                    "percent_of_rank_graph_nonoverlap_kernel_time": (
+                        100.0 * exclusive_ms / rank_nonoverlap_totals[rank]
+                        if rank_nonoverlap_totals[rank]
+                        else None
+                    ),
+                }
+            )
+        components.append(
+            {
+                "scope": scope,
+                "summed_kernel_ms": summed_ms,
+                "interval_union_kernel_ms": nonoverlap_ms,
+                "exclusive_nonoverlap_kernel_ms": exclusive_nonoverlap_ms,
+                "percent_of_graph_kernel_work": (
+                    100.0 * summed_ms / total_graph_kernel_ms
+                    if total_graph_kernel_ms
+                    else None
+                ),
+                "percent_of_graph_nonoverlap_kernel_time": (
+                    100.0 * exclusive_nonoverlap_ms / total_graph_nonoverlap_ms
+                    if total_graph_nonoverlap_ms
+                    else None
+                ),
+                "canonical_graph_nodes": len(scope_nodes),
+                "ranks": rank_rows,
+                "implementations": sorted(
+                    {candidate["implementation"] for candidate in candidates}
+                ),
+                "symbols": sorted(
+                    {
+                        symbol["symbol"]
+                        for node in scope_nodes
+                        for symbol in node["symbols"]
+                    }
+                ),
+                "sources": _unique_records(
                     source
-                    for source in implementation.get("sources", [])
-                    if Path(source.get("path", "")).suffix in {".cu", ".cuh"}
-                ],
-                "loaded_libraries": implementation.get("loaded_libraries", []),
+                    for candidate in candidates
+                    for source in candidate["sources"]
+                ),
+                "loaded_libraries": _unique_records(
+                    library
+                    for candidate in candidates
+                    for library in candidate["loaded_libraries"]
+                ),
             }
         )
-    return candidates
+    return components
+
+
+def _unique_records(records) -> list[dict[str, Any]]:
+    unique = {}
+    for record in records:
+        unique[json.dumps(record, sort_keys=True)] = record
+    return [unique[key] for key in sorted(unique)]
+
+
+def _interval_union_by_lane(intervals) -> int:
+    by_lane = defaultdict(list)
+    for lane, start, end in intervals:
+        if end > start:
+            by_lane[lane].append((start, end))
+    total = 0
+    for lane_intervals in by_lane.values():
+        current_start = current_end = None
+        for start, end in sorted(lane_intervals):
+            if current_end is None:
+                current_start, current_end = start, end
+            elif start <= current_end:
+                current_end = max(current_end, end)
+            else:
+                total += current_end - current_start
+                current_start, current_end = start, end
+        if current_end is not None:
+            total += current_end - current_start
+    return total
+
+
+def _partition_intervals_by_scope(nodes: list[dict[str, Any]]) -> dict[str, Any]:
+    events_by_lane = defaultdict(list)
+    for node in nodes:
+        scope = node.get("resolved_scope")
+        for lane, start, end in node["_kernel_intervals"]:
+            if end > start:
+                events_by_lane[lane].append((start, 1, scope))
+                events_by_lane[lane].append((end, -1, scope))
+
+    exclusive_scope_ns = defaultdict(int)
+    total_ns = resolved_ns = unresolved_ns = cross_component_overlap_ns = 0
+    for events in events_by_lane.values():
+        active = defaultdict(int)
+        previous = None
+        index = 0
+        events.sort(key=lambda event: event[0])
+        while index < len(events):
+            timestamp = events[index][0]
+            if previous is not None and timestamp > previous:
+                duration = timestamp - previous
+                active_scopes = {scope for scope, count in active.items() if count > 0}
+                if active_scopes:
+                    total_ns += duration
+                    if None in active_scopes:
+                        unresolved_ns += duration
+                    else:
+                        resolved_ns += duration
+                        if len(active_scopes) == 1:
+                            exclusive_scope_ns[next(iter(active_scopes))] += duration
+                        else:
+                            cross_component_overlap_ns += duration
+            while index < len(events) and events[index][0] == timestamp:
+                _, delta, scope = events[index]
+                active[scope] += delta
+                index += 1
+            previous = timestamp
+    return {
+        "total_ns": total_ns,
+        "resolved_ns": resolved_ns,
+        "unresolved_ns": unresolved_ns,
+        "cross_component_overlap_ns": cross_component_overlap_ns,
+        "exclusive_scope_ns": dict(exclusive_scope_ns),
+    }
+
+
+def _rank_for_global_pid(global_pid: int | None, report) -> str | None:
+    if global_pid is None or report is None:
+        return None
+    by_pid = {
+        process.get("pid"): process.get("rank_label")
+        for process in report.get("processes", [])
+        if process.get("pid") is not None
+    }
+    # Nsight encodes a CUDA global process/thread ID as pid << 24 on some
+    # export versions; other versions expose the host pid directly.
+    return by_pid.get(global_pid) or by_pid.get(global_pid >> 24)
+
+
+def _validate_graph_map(result, report):
+    contracts = report.get("contracts", []) if report else []
+    if not contracts:
+        return {
+            "status": "not_required",
+            "errors": [],
+            "evidence": "no model profiling contract was supplied",
+        }
+    required = {
+        scope
+        for contract in contracts
+        for scope in contract.get("graph_required_scopes", [])
+    }
+    observed = {component["scope"] for component in result["components"]}
+    errors = []
+    missing = sorted(required - observed)
+    if missing:
+        errors.append("missing graph components: " + ", ".join(missing))
+    minimum = max(
+        contract.get("minimum_graph_duration_attribution", 0.0)
+        for contract in contracts
+    )
+    ratio = result["coverage"]["graph_duration_attribution_ratio"]
+    if ratio is None or ratio < minimum:
+        errors.append(
+            f"graph duration attribution below threshold: {ratio!r} < {minimum}"
+        )
+    if any(contract.get("require_hashed_sources", True) for contract in contracts):
+        unhashed = [
+            component["scope"]
+            for component in result["components"]
+            if not component["sources"]
+            or any(not source.get("sha256") for source in component["sources"])
+        ]
+        if unhashed:
+            errors.append(
+                "graph components lack hashed sources: " + ", ".join(unhashed)
+            )
+    return {
+        "status": "failed" if errors else "passed",
+        "errors": errors,
+        "required_scopes": sorted(required),
+    }
 
 
 def _export_schema_version(connection, tables) -> str | None:
@@ -395,7 +733,9 @@ def _sha256(path: Path) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("sqlite", help="SQLite exported from an Nsight Systems report")
+    parser.add_argument(
+        "sqlite", help="Nsight Systems .nsys-rep or exported SQLite report"
+    )
     parser.add_argument(
         "--profile-report", help="LangSlanger profile report JSON for source joins"
     )

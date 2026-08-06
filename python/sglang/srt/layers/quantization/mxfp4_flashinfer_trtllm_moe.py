@@ -14,6 +14,7 @@ from sglang.srt.distributed.device_communicators.pynccl_allocator import (
 )
 from sglang.srt.layers.dp_attention import is_allocation_symmetric
 from sglang.srt.layers.moe.utils import RoutingMethodType
+from sglang.srt.observability.profile_scope import register_profile_impl
 from sglang.srt.runtime_context import get_exec
 from sglang.srt.utils import (
     is_flashinfer_available,
@@ -56,6 +57,24 @@ class Mxfp4FlashinferTrtllmMoEMethod:
 
     def create_moe_runner(self, layer, moe_runner_config):
         self.moe_runner_config = moe_runner_config
+        register_profile_impl(
+            "model.moe.experts",
+            "flashinfer.trtllm_mxfp4.sm100",
+            source_objects=(trtllm_fp4_block_scale_routed_moe,),
+            source_files=(__file__,),
+            expected_symbols=(
+                "bmm_MxE4m3",
+                "bmm_Bfloat16_MxE2m1",
+                "finalizeKernel",
+                "trtllm_fp4_block_scale_routed_moe",
+            ),
+            loaded_modules=("flashinfer",),
+            conditions={
+                "quantization": "mxfp4",
+                "gpu_arch": "sm100",
+                "precision": self.flashinfer_mxfp4_moe_precision,
+            },
+        )
 
         swiglu_limit = moe_runner_config.swiglu_limit
         assert (

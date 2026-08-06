@@ -37,6 +37,15 @@ class TestProfileReport(unittest.TestCase):
                     _event("aten::op", "cpu_op", 1, 4, 7),
                     _event("kernel_a", "kernel", 5, 5, 7, pid=2, tid=3),
                     _event("kernel_b", "kernel", 8, 5, 7, pid=2, tid=4),
+                    _event(
+                        "annotation",
+                        "gpu_user_annotation",
+                        2,
+                        100,
+                        7,
+                        pid=2,
+                        tid=5,
+                    ),
                     _event("kernel_unattributed", "kernel", 15, 2, 99, pid=2, tid=3),
                 ]
             }
@@ -49,6 +58,8 @@ class TestProfileReport(unittest.TestCase):
                     "batch_size": 9,
                     "batch_bucket": "9-16",
                     "scheduler_iteration": 3,
+                    "worker": "target",
+                    "forward_mode": "target_verify",
                 },
                 {"event": "scope_end", "scope": "spec.verify"},
                 {
@@ -72,6 +83,17 @@ class TestProfileReport(unittest.TestCase):
                     ],
                     "loaded_libraries": [],
                     "attribution_source": "explicit_dispatch_declaration",
+                },
+                {
+                    "event": "profile_contract",
+                    "contract_id": "contract-1",
+                    "model_family": "test",
+                    "architecture": "TestModel",
+                    "required_implementation_scopes": ["spec.verify"],
+                    "graph_required_scopes": [],
+                    "minimum_kernel_duration_attribution": 0.8,
+                    "minimum_graph_duration_attribution": 0.8,
+                    "require_hashed_sources": True,
                 },
             ]
             steps_path.write_text(
@@ -97,9 +119,16 @@ class TestProfileReport(unittest.TestCase):
             self.assertAlmostEqual(
                 row["request_weighted_gpu_ms_per_committed_token"], 0.004
             )
+            self.assertEqual(row["percent_of_hotloop_gpu_elapsed"], 100.0)
             self.assertAlmostEqual(
                 report["coverage"]["gpu_event_attribution_ratio"], 2 / 3
             )
+            self.assertAlmostEqual(
+                report["coverage"]["kernel_duration_attribution_ratio"], 10 / 12
+            )
+            self.assertEqual(report["coverage"]["summed_gpu_work_ms"], 0.012)
+            self.assertEqual(report["coverage"]["gpu_annotation_events"], 1)
+            self.assertEqual(report["validation"]["status"], "passed")
             self.assertIsNone(report["scopes"][0]["distributed_critical_path_ms"])
             self.assertEqual(row["implementation_ids"], ["impl-1"])
             self.assertEqual(
@@ -212,6 +241,57 @@ class TestProfileReport(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "incomplete_ranks"):
                 analyze_profile(profile_dir)
+
+    def test_strict_report_rejects_missing_model_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            profile_dir = Path(temporary_dir)
+            trace_path = profile_dir / "run-TP-0.trace.json.gz"
+            steps_path = profile_dir / "run-TP-0.steps.jsonl"
+            manifest_path = profile_dir / "run-TP-0.manifest.json"
+            with gzip.open(trace_path, "wt", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "traceEvents": [
+                            _event("model.moe", "user_annotation", 0, 10, 1),
+                            _event("aten::op", "cpu_op", 1, 2, 7),
+                            _event("kernel", "kernel", 3, 2, 7, pid=2, tid=3),
+                        ]
+                    },
+                    handle,
+                )
+            records = [
+                {"event": "scope_start", "scope": "model.moe"},
+                {
+                    "event": "profile_contract",
+                    "contract_id": "contract-1",
+                    "model_family": "test",
+                    "architecture": "TestModel",
+                    "required_implementation_scopes": ["model.moe.experts"],
+                    "graph_required_scopes": [],
+                    "minimum_kernel_duration_attribution": 0.8,
+                    "minimum_graph_duration_attribution": 0.8,
+                    "require_hashed_sources": True,
+                },
+            ]
+            steps_path.write_text(
+                "".join(json.dumps(record) + "\n" for record in records)
+            )
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "profile_id": "run",
+                        "rank_label": "TP-0",
+                        "parallel": {"tp_rank": 0, "dp_rank": 0},
+                        "artifacts": [_artifact(trace_path), _artifact(steps_path)],
+                    }
+                )
+            )
+
+            with self.assertRaisesRegex(
+                ValueError, "missing implementation declarations"
+            ):
+                write_profile_report(profile_dir)
 
     def test_reports_aligned_distributed_steps_and_collectives(self):
         with tempfile.TemporaryDirectory() as temporary_dir:

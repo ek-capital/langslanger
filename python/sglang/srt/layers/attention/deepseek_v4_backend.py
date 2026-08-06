@@ -60,6 +60,10 @@ from sglang.srt.layers.attention.dsv4.sparse_prefill_utils import (
 from sglang.srt.layers.attention.verify_mask import VerifyMask, maybe_create_verify_mask
 from sglang.srt.mem_cache.deepseek_v4_memory_pool import DeepSeekV4TokenToKVPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+from sglang.srt.observability.profile_scope import (
+    profile_scope,
+    register_profile_impl,
+)
 from sglang.srt.runtime_context import get_parallel, get_spec
 from sglang.srt.speculative.eagle_utils import per_step_draft_out_cache_loc
 from sglang.srt.speculative.ragged_verify import (
@@ -571,6 +575,66 @@ class DeepseekV4AttnBackend(
         self.is_dspark_draft = model_runner.is_draft_worker and spec_alg.is_dspark()
         self.is_draft_runner = model_runner.is_draft_worker
         self._verify_mask = None
+        self._register_profile_implementations()
+
+    def _register_profile_implementations(self) -> None:
+        role = "draft" if self.is_draft_runner else "target"
+        common = {
+            "architecture": "deepseek_v4",
+            "worker": role,
+            "device": self.device.type,
+        }
+        if _is_sm120:
+            register_profile_impl(
+                "model.attention.mla",
+                "sglang.flash_mla_sm120",
+                source_files=(
+                    __file__,
+                    "python/sglang/kernels/ops/attention/flash_mla_sm120.py",
+                    "python/sglang/kernels/ops/attention/flash_mla_sm120_triton.py",
+                ),
+                expected_symbols=("flash_fwd", "sparse_attn_fwd_kernel"),
+                loaded_modules=("sglang",),
+                conditions={**common, "gpu_arch": "sm120"},
+            )
+        else:
+            register_profile_impl(
+                "model.attention.mla",
+                "sgl_kernel.flash_mla",
+                source_files=(__file__,),
+                expected_symbols=(
+                    "flash_fwd_splitkv_mla",
+                    "flash_mla",
+                    "flash_mla_sparse_fwd",
+                ),
+                loaded_modules=("sgl_kernel",),
+                conditions={**common, "gpu_arch": "non_sm120"},
+            )
+
+        register_profile_impl(
+            "model.attention.compressor",
+            "sglang.dsv4.unified_compressor",
+            source_files=(
+                "python/sglang/srt/layers/attention/dsv4/compressor_v2.py",
+                "python/sglang/kernels/ops/attention/dsv4/compress.py",
+                "python/sglang/kernels/ops/attention/dsv4/fused_compress_triton.py",
+            ),
+            expected_symbols=(
+                "compress_forward",
+                "compress_norm_rope_store",
+                "fused_ape_pool_norm_rope",
+                "c4_decode_kernel",
+                "c4_prefill_compress_kernel",
+                "c4_prefill_write_kernel",
+                "c128_decode_kernel",
+                "c128_prefill_compress_kernel",
+                "c128_prefill_write_kernel",
+                "compress_norm_rope_kernel",
+                "compress_norm_rope_hadamard_kernel",
+            ),
+            loaded_modules=("sglang", "sgl_kernel"),
+            conditions={**common, "online_c128": self.online_c128_mtp.enabled()},
+        )
 
     def _move_to_device(self, x: List[int]) -> torch.Tensor:
         pin_tensor = torch.tensor(x, dtype=torch.int32, pin_memory=True)
@@ -1606,6 +1670,36 @@ class DeepseekV4AttnBackend(
             )
 
     def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        layer: RadixAttention,
+        forward_batch: ForwardBatch,
+        compress_ratio: Literal[0, 4, 128],
+        save_kv_cache: bool = True,
+        attn_sink: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        with profile_scope(
+            "model.attention.mla",
+            layer=layer.layer_id,
+            compress_ratio=compress_ratio,
+            forward_mode=str(forward_batch.forward_mode),
+        ):
+            return self._forward_impl(
+                q=q,
+                k=k,
+                v=v,
+                layer=layer,
+                forward_batch=forward_batch,
+                compress_ratio=compress_ratio,
+                save_kv_cache=save_kv_cache,
+                attn_sink=attn_sink,
+                **kwargs,
+            )
+
+    def _forward_impl(
         self,
         q: torch.Tensor,
         k: torch.Tensor,

@@ -82,7 +82,9 @@ class TestProfileGraphMap(unittest.TestCase):
                 json.dumps(
                     {
                         "profile_id": "profile-1",
-                        "processes": [{"pid": 42, "rank_label": "TP-6"}],
+                        "processes": [
+                            {"pid": 999, "local_rank": 6, "rank_label": "TP-6"}
+                        ],
                         "implementations": [
                             {
                                 "implementation_id": "impl-1",

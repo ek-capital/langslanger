@@ -106,7 +106,7 @@ def analyze_graph_sqlite(
         }.get(len(source_candidates), "ambiguous")
         node = {
             "global_pid": global_pid,
-            "rank_label": _rank_for_global_pid(global_pid, report),
+            "rank_label": _rank_for_global_pid(global_pid, report, devices),
             "graph_id": graph_id,
             "canonical_graph_node_id": canonical_node_id,
             "observed_graph_node_ids": sorted(observed_node_ids),
@@ -623,8 +623,10 @@ def _partition_intervals_by_scope(nodes: list[dict[str, Any]]) -> dict[str, Any]
     }
 
 
-def _rank_for_global_pid(global_pid: int | None, report) -> str | None:
-    if global_pid is None or report is None:
+def _rank_for_global_pid(
+    global_pid: int | None, report, device_ids: set[int] | None = None
+) -> str | None:
+    if report is None:
         return None
     by_pid = {
         process.get("pid"): process.get("rank_label")
@@ -633,7 +635,26 @@ def _rank_for_global_pid(global_pid: int | None, report) -> str | None:
     }
     # Nsight encodes a CUDA global process/thread ID as pid << 24 on some
     # export versions; other versions expose the host pid directly.
-    return by_pid.get(global_pid) or by_pid.get(global_pid >> 24)
+    if global_pid is not None:
+        direct = by_pid.get(global_pid) or by_pid.get(global_pid >> 24)
+        if direct is not None:
+            return direct
+
+    # Timing and graph attribution are intentionally separate runs, so their
+    # host PIDs normally differ. On a single-node run, CUDA device id uniquely
+    # identifies the timing report's local rank. Do not guess when the report
+    # spans nodes and more than one process matches the device.
+    if device_ids and len(device_ids) == 1:
+        (device_id,) = device_ids
+        matches = [
+            process.get("rank_label")
+            for process in report.get("processes", [])
+            if process.get("local_rank") == device_id
+            and process.get("rank_label") is not None
+        ]
+        if len(matches) == 1:
+            return matches[0]
+    return None
 
 
 def _validate_graph_map(result, report):

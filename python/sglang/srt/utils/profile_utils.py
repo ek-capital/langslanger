@@ -36,6 +36,23 @@ if _is_npu:
 logger = logging.getLogger(__name__)
 
 
+def _start_cuda_profiler(*, first_rank_in_node: bool, cpu_group) -> None:
+    """Start one Nsight capture per node without letting follower ranks run ahead."""
+    if first_rank_in_node:
+        logger.info("Call cudaProfilerStart")
+        torch.cuda.cudart().cudaProfilerStart()
+    torch.distributed.barrier(cpu_group)
+
+
+def _stop_cuda_profiler(*, first_rank_in_node: bool, cpu_group) -> None:
+    """Keep ranks parked while the node leader stops and flushes its capture."""
+    torch.distributed.barrier(cpu_group)
+    if first_rank_in_node:
+        logger.info("Call cudaProfilerStop")
+        torch.cuda.cudart().cudaProfilerStop()
+    torch.distributed.barrier(cpu_group)
+
+
 def export_cuda_graph_capture_trace(prof_context, *, runner_name: str, tp_rank: int):
     """Persist a CUDA-graph capture profiler trace (chrome trace) to disk.
 
@@ -427,14 +444,16 @@ class _ProfilerMemory(_ProfilerConcreteBase):
 
 class _ProfilerCudart(_ProfilerConcreteBase):
     def start(self):
-        if self.first_rank_in_node:
-            logger.info(f"Call cudaProfilerStart")
-            torch.cuda.cudart().cudaProfilerStart()
+        _start_cuda_profiler(
+            first_rank_in_node=self.first_rank_in_node,
+            cpu_group=self.cpu_group,
+        )
 
     def stop(self):
-        if self.first_rank_in_node:
-            logger.info(f"Call cudaProfilerStop")
-            torch.cuda.cudart().cudaProfilerStop()
+        _stop_cuda_profiler(
+            first_rank_in_node=self.first_rank_in_node,
+            cpu_group=self.cpu_group,
+        )
         return []
 
 

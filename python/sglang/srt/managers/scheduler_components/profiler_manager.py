@@ -28,7 +28,11 @@ from sglang.srt.platforms import current_platform
 from sglang.srt.runtime_context import get_device, get_server_args
 from sglang.srt.utils import is_mps, is_npu
 from sglang.srt.utils.profile_merger import ProfileMerger
-from sglang.srt.utils.profile_utils import ProfileManager
+from sglang.srt.utils.profile_utils import (
+    ProfileManager,
+    _start_cuda_profiler,
+    _stop_cuda_profiler,
+)
 from sglang.srt.utils.torch_npu_patch_utils import apply_torch_npu_patches
 
 if TYPE_CHECKING:
@@ -265,8 +269,10 @@ class SchedulerProfilerManager:
             self.profile_in_progress = True
 
         if "CUDA_PROFILER" in activities:
-            if self.ps.gpu_id == get_device().base_gpu_id:
-                torch.cuda.cudart().cudaProfilerStart()
+            _start_cuda_profiler(
+                first_rank_in_node=self.ps.gpu_id == get_device().base_gpu_id,
+                cpu_group=self.dp_tp_cpu_group,
+            )
             self.profile_in_progress = True
 
         if self.profile_in_progress:
@@ -389,8 +395,10 @@ class SchedulerProfilerManager:
             artifact_paths.append(memory_profile_path)
 
         if "CUDA_PROFILER" in self.profiler_activities:
-            if self.ps.gpu_id == get_device().base_gpu_id:
-                torch.cuda.cudart().cudaProfilerStop()
+            _stop_cuda_profiler(
+                first_rank_in_node=self.ps.gpu_id == get_device().base_gpu_id,
+                cpu_group=self.dp_tp_cpu_group,
+            )
 
         sidecar_path = stop_profile_recording()
         if sidecar_path is not None:

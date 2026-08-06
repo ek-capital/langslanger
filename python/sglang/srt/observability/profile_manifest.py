@@ -18,12 +18,14 @@ import tempfile
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
-from sglang.srt.distributed.parallel_state_wrapper import ParallelState
 from sglang.version import __version__ as sglang_version
+
+if TYPE_CHECKING:
+    from sglang.srt.distributed.parallel_state_wrapper import ParallelState
 
 PROFILE_MANIFEST_SCHEMA_VERSION = 2
 _SECRET_SUFFIXES = (

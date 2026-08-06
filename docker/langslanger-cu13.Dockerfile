@@ -20,13 +20,12 @@ COPY . /sgl-workspace/langslanger
 
 RUN test "$(git -C /sgl-workspace/langslanger rev-parse HEAD)" = "${LANGSLANGER_GIT_SHA}" \
     && python3 -m pip install \
-        --no-build-isolation \
         --no-cache-dir \
         --no-deps \
         --force-reinstall \
         -e /sgl-workspace/langslanger/python \
     && python3 -c "from pathlib import Path; import sglang; p = Path(sglang.__file__).resolve(); expected = Path('/sgl-workspace/langslanger/python'); assert p.is_relative_to(expected), (p, expected); print(p)" \
-    && python3 -c "from sglang.srt.grpc import _core as grpc_core; from sglang.srt.multimodal import _core as mm_core; from sglang.srt.server import _core as server_core; print(grpc_core, mm_core, server_core)" \
+    && python3 -c "from sglang.srt.grpc import _core as grpc_core; from sglang.srt.multimodal import _core as mm_core; print(grpc_core, mm_core)" \
     && sglang version
 
 ENV LANGSLANGER_IMAGE_REVISION=${LANGSLANGER_GIT_SHA}

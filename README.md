@@ -44,6 +44,26 @@ LangSlanger is an independent fork and is not affiliated with or endorsed by
 the SGLang project. See [ATTRIBUTION.md](ATTRIBUTION.md) for provenance and
 licensing details.
 
+## Prebuilt CUDA 13 image
+
+Every successful commit to `main` publishes an AMD64 CUDA 13 image to GitHub
+Container Registry. Use the moving tag for the latest research build:
+
+```bash
+docker pull ghcr.io/ek-capital/langslanger:main-cu13
+```
+
+For reproducible profiling, pin the immutable commit tag instead:
+
+```bash
+docker pull ghcr.io/ek-capital/langslanger:sha-<40-character-git-sha>
+```
+
+The image keeps the exact checkout at `/sgl-workspace/langslanger`, sets
+`LANGSLANGER_IMAGE_REVISION`, and prebuilds the native extensions. A RunPod can
+therefore start from the image without cloning the repository or running
+`pip install -e`.
+
 ## Upstream SGLang documentation
 
 The remainder of this README is retained from upstream so SGLang commands and

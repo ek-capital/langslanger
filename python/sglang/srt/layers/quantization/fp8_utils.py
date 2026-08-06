@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Callable, List, Optional, Tuple, Union
 import torch
 
 from sglang.kernels.ops.quantization.fp8_kernel import (
+    _register_deep_gemm_mxfp8_fp4_profile_impl,
     sglang_per_token_group_quant_fp8,
     sglang_per_token_group_quant_fp8_row_padded,
 )
@@ -490,6 +491,10 @@ def dispatch_w8a8_block_fp8_linear() -> Callable:
 def dispatch_w8a8_mxfp8_linear() -> Callable:
     backend = get_fp8_gemm_runner_backend()
     if backend.is_deep_gemm():
+        # Dispatch happens while the model is constructed, before CUDA graph
+        # capture.  Persist the decision here because graph replay does not
+        # re-enter the Python matmul wrapper after profiling starts.
+        _register_deep_gemm_mxfp8_fp4_profile_impl()
         return _deepgemm_w8a8_mxfp8_linear_with_fallback
     elif backend.is_flashinfer_cutlass() or backend.is_flashinfer_trtllm():
         return flashinfer_mxfp8_blockscaled_linear

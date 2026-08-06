@@ -959,7 +959,11 @@ class C4Indexer(nn.Module):
             modules = ("sgl_kernel",)
         else:
             implementation = "deep_gemm.fp8_paged_mqa_logits"
-            expected_symbols = ("fp8_paged_mqa_logits", "topk_transform")
+            expected_symbols = (
+                "fp8_paged_mqa_logits",
+                "paged_mqa_logits",
+                "topk_transform",
+            )
             modules = ("deep_gemm",)
 
         register_profile_impl(

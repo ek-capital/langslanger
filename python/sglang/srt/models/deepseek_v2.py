@@ -844,11 +844,16 @@ class DeepseekV2MoE(nn.Module):
         # SGLANG_OPT_MOE_QUANT_ONCE eligibility, resolved lazily on first
         # forward (weights and runner are final by then). None = undecided.
         self._moe_quant_once: Optional[bool] = None
+        router_symbols = (
+            ("moe_hash_topk_fused",)
+            if isinstance(self.topk, HashTopK)
+            else ("topk_small_batch_kernel", "grouped_topk")
+        )
         register_profile_impl(
             "model.moe.router",
             f"{type(self.topk).__module__}.{type(self.topk).__qualname__}",
             source_objects=(type(self.gate), type(self.topk)),
-            expected_symbols=("router", "topk", "grouped_topk"),
+            expected_symbols=router_symbols,
             loaded_modules=("sglang", "sgl_kernel"),
             conditions={
                 "architecture": (

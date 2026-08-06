@@ -631,6 +631,15 @@ class DeepseekV4AttnBackend(
                 "c128_prefill_write_kernel",
                 "compress_norm_rope_kernel",
                 "compress_norm_rope_hadamard_kernel",
+                # DeepSeek-V4 Flash-0731 names emitted by the current SM100
+                # prefill/verify graphs.
+                "flash_c4_prefill",
+                "write_c4_prefill",
+                "flash_c128_prefill",
+                "write_c128_prefill",
+                "plan_compress_prefill",
+                "_init_compressed_attn_metadata",
+                "_hc_head_kernel",
             ),
             loaded_modules=("sglang", "sgl_kernel"),
             conditions={**common, "online_c128": self.online_c128_mtp.enabled()},

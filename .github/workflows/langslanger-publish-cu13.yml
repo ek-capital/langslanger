@@ -1,0 +1,93 @@
+name: Publish LangSlanger CUDA 13
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: langslanger-publish-cu13-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/ek-capital/langslanger
+  BASE_IMAGE: lmsysorg/sglang:v0.5.16-cu130@sha256:7b6a35df9839fd593a94a1eaee82d7777f472225d9f3ad1f8a2e0cb2bd1785d0
+
+jobs:
+  publish:
+    if: github.repository == 'ek-capital/langslanger'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # The pinned upstream image is about 13.5 GB compressed. Reclaim the
+      # preinstalled SDKs that this Docker-only job never uses before BuildKit
+      # pulls and layers it.
+      - name: Reclaim runner disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,format=long,prefix=sha-
+            type=raw,value=main-cu13,enable=${{ github.ref == 'refs/heads/main' }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Build and publish CUDA 13 image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/langslanger-cu13.Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BASE_IMAGE=${{ env.BASE_IMAGE }}
+            LANGSLANGER_GIT_SHA=${{ github.sha }}
+          provenance: mode=max
+
+      - name: Verify published manifest
+        run: docker buildx imagetools inspect "${IMAGE_NAME}@${{ steps.build.outputs.digest }}"
+
+      - name: Write pull instructions
+        run: |
+          {
+            echo '### LangSlanger CUDA 13 image'
+            echo
+            echo "Immutable: \`${IMAGE_NAME}:sha-${GITHUB_SHA}\`"
+            if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+              echo "Moving main tag: \`${IMAGE_NAME}:main-cu13\`"
+            fi
+            echo "Digest: \`${IMAGE_NAME}@${{ steps.build.outputs.digest }}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"

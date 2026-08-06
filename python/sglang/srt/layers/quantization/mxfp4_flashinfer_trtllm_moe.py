@@ -67,6 +67,12 @@ class Mxfp4FlashinferTrtllmMoEMethod:
                 "bmm_Bfloat16_MxE2m1",
                 "finalizeKernel",
                 "trtllm_fp4_block_scale_routed_moe",
+                "routingIndicesDynBlockKernel",
+                "routingIndicesClusterKernel",
+                "silu_mul_clamp_kernel",
+                "fp8_wo_a_group_major_quant",
+                "transpose_and_pack_fp32_into_ue8m0",
+                "kernel_cutlass_kernel_flashinf",
             ),
             loaded_modules=("flashinfer",),
             conditions={

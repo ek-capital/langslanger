@@ -845,9 +845,18 @@ class DeepseekV2MoE(nn.Module):
         # forward (weights and runner are final by then). None = undecided.
         self._moe_quant_once: Optional[bool] = None
         router_symbols = (
-            ("moe_hash_topk_fused",)
+            (
+                "moe_hash_topk_fused",
+                "_router_triton_kernel",
+                "_pack_topk_ids_triton_kernel",
+            )
             if isinstance(self.topk, HashTopK)
-            else ("topk_small_batch_kernel", "grouped_topk")
+            else (
+                "topk_small_batch_kernel",
+                "grouped_topk",
+                "_router_triton_kernel",
+                "_pack_topk_ids_triton_kernel",
+            )
         )
         register_profile_impl(
             "model.moe.router",

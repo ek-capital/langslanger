@@ -31,6 +31,7 @@ except:
 from sglang.kernels.jit.utils import is_arch_support_pdl
 from sglang.kernels.ops.quantization.fp8_utils import fp8_dtype_to_triton
 from sglang.srt.layers import deep_gemm_wrapper
+from sglang.srt.observability.profile_scope import register_profile_impl
 from sglang.srt.utils import (
     ceil_align,
     get_bool_env_var,
@@ -145,7 +146,30 @@ def deep_gemm_mxfp8_fp8_bf16_nt(
     Bs: torch.Tensor,
     C: torch.Tensor,
 ) -> None:
+    _register_deep_gemm_mxfp8_fp4_profile_impl()
     deep_gemm_wrapper.gemm_nt_mxfp8_f8f8bf16((A, As), (B, Bs), C)
+
+
+@lru_cache(maxsize=1)
+def _register_deep_gemm_mxfp8_fp4_profile_impl() -> None:
+    register_profile_impl(
+        "model.linear",
+        "deep_gemm.fp8_fp4_gemm_nt",
+        source_objects=(deep_gemm_mxfp8_fp8_bf16_nt,),
+        source_files=(
+            __file__,
+            "python/sglang/srt/layers/deep_gemm_wrapper/entrypoint.py",
+            "python/sglang/kernels/jit/csrc/gemm/per_token_group_quant.cuh",
+        ),
+        expected_symbols=(
+            "sm100_fp8_fp4_gemm_1d1d_impl",
+            "nvjet_sm100",
+            "per_token_group_quant_flat_kernel",
+            "splitKreduce_kernel",
+        ),
+        loaded_modules=("deep_gemm", "sglang"),
+        conditions={"activation": "mxfp8", "weight": "mxfp4"},
+    )
 
 
 @triton.jit

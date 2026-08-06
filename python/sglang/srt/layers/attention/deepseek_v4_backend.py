@@ -601,11 +601,21 @@ class DeepseekV4AttnBackend(
             register_profile_impl(
                 "model.attention.mla",
                 "sgl_kernel.flash_mla",
-                source_files=(__file__,),
+                source_files=(
+                    __file__,
+                    "python/sglang/kernels/jit/csrc/deepseek_v4/main_norm_rope.cuh",
+                    "python/sglang/kernels/ops/attention/dsv4/elementwise.py",
+                ),
                 expected_symbols=(
                     "flash_fwd_splitkv_mla",
                     "flash_mla",
                     "flash_mla_sparse_fwd",
+                    "flash_fwd_mla_combine_kernel",
+                    "fused_k_norm_rope_flashmla",
+                    "fused_q_norm_rope",
+                    "fused_norm_rope_flashmla",
+                    "deepseek_rope_kernel",
+                    "get_mla_metadata_kernel",
                 ),
                 loaded_modules=("sgl_kernel",),
                 conditions={**common, "gpu_arch": "non_sm120"},

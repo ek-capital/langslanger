@@ -973,8 +973,14 @@ class C4Indexer(nn.Module):
                 __file__,
                 "python/sglang/kernels/ops/attention/dsv4/fp4_indexer.py",
                 "python/sglang/kernels/ops/attention/dsv4/topk.py",
+                "python/sglang/kernels/jit/csrc/deepseek_v4/fused_norm_rope_v2.cuh",
+                "python/sglang/kernels/jit/csrc/deepseek_v4/main_norm_rope.cuh",
             ),
-            expected_symbols=expected_symbols,
+            expected_symbols=expected_symbols
+            + (
+                "fused_q_indexer_rope_hadamard_quant",
+                "fused_norm_rope_indexer",
+            ),
             loaded_modules=modules,
             conditions={
                 "architecture": "deepseek_v4",

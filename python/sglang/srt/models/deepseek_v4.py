@@ -2638,8 +2638,14 @@ class DeepseekV4ForCausalLM(nn.Module):
             source_files=(
                 __file__,
                 "python/sglang/kernels/ops/layernorm/mhc.py",
+                "python/sglang/srt/layers/deep_gemm_wrapper/entrypoint.py",
             ),
-            expected_symbols=("mhc_pre", "mhc_post", "mhc_fused_post_pre"),
+            expected_symbols=(
+                "mhc_pre",
+                "mhc_post",
+                "mhc_fused_post_pre",
+                "sm100_tf32_hc_prenorm_gemm",
+            ),
             loaded_modules=("sglang", "tilelang", "aiter", "torch_npu"),
             conditions={
                 "architecture": "deepseek_v4",

@@ -15,11 +15,13 @@ from contextlib import contextmanager, nullcontext
 from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any, Iterator
 
-from sglang.srt.distributed.parallel_state_wrapper import ParallelState
 from sglang.srt.observability.profile_manifest import profile_rank_label
 from sglang.srt.utils.nvtx_utils import profile_range
+
+if TYPE_CHECKING:
+    from sglang.srt.distributed.parallel_state_wrapper import ParallelState
 
 PROFILE_STEP_SCHEMA_VERSION = 3
 _LOCK = threading.Lock()

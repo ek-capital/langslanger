@@ -3,7 +3,8 @@
 FROM lmsysorg/sglang@sha256:984699c298a95b73c469b2191403ddc85fd780506e13c39c4afff3845e27bc6c
 
 ARG SOURCE_COMMIT="unknown"
-ARG SGL_DEEP_GEMM_VERSION="0.1.5.post2"
+ARG DEEP_GEMM_PACKAGE_VERSION="0.1.5.post2"
+ARG FLASHINFER_PACKAGE_VERSION="0.6.15.post1"
 
 LABEL org.opencontainers.image.title="LangSlanger B200 DeepSeek-V4 runtime" \
       org.opencontainers.image.description="SGLang-compatible LangSlanger runtime with SM100 DeepSeek-V4 kernels precompiled" \
@@ -12,11 +13,23 @@ LABEL org.opencontainers.image.title="LangSlanger B200 DeepSeek-V4 runtime" \
       org.opencontainers.image.base.name="docker.io/lmsysorg/sglang:v0.5.16" \
       org.opencontainers.image.base.digest="sha256:984699c298a95b73c469b2191403ddc85fd780506e13c39c4afff3845e27bc6c"
 
-# The official CUDA 13 image already contains FlashInfer's JIT-cache wheel and
-# the 1,696-entry TRT-LLM MXFP4 MoE cubin pool. Upgrade DeepGEMM to the version
-# used by the profiled checkout, then discard package-download caches.
+# Match the exact FlashInfer trio and DeepGEMM release used by the profiled
+# checkout. The official image already carries the 1,696-entry TRT-LLM MXFP4
+# MoE cubin pool; these wheel installs add no model-weight data.
+RUN python3 -m pip uninstall -y \
+      flashinfer-python flashinfer-cubin flashinfer-jit-cache && \
+    rm -rf /root/.cache/flashinfer /root/.cache/pip && \
+    python3 -m pip install --no-deps \
+      "flashinfer-python==${FLASHINFER_PACKAGE_VERSION}" && \
+    python3 -m pip install --no-deps \
+      "flashinfer-cubin==${FLASHINFER_PACKAGE_VERSION}" \
+      --index-url https://flashinfer.ai/whl && \
+    python3 -m pip install --no-deps \
+      "flashinfer-jit-cache==${FLASHINFER_PACKAGE_VERSION}" \
+      --index-url https://flashinfer.ai/whl/cu130 && \
+    rm -rf /root/.cache/flashinfer /root/.cache/pip
 RUN python3 -m pip install --no-deps --force-reinstall \
-      "sgl-deep-gemm==${SGL_DEEP_GEMM_VERSION}" && \
+      "sgl-deep-gemm==${DEEP_GEMM_PACKAGE_VERSION}" && \
     rm -rf /root/.cache/pip
 
 # Preserve the base image's editable installation and compiled extensions while

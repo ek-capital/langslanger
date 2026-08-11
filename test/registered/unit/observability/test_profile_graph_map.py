@@ -34,6 +34,7 @@ class TestProfileGraphMap(unittest.TestCase):
                         streamId INTEGER NOT NULL,
                         globalPid INTEGER,
                         shortName INTEGER NOT NULL,
+                        demangledName INTEGER,
                         graphNodeId INTEGER,
                         gridX INTEGER,
                         gridY INTEGER,
@@ -49,7 +50,11 @@ class TestProfileGraphMap(unittest.TestCase):
                 )
                 connection.execute(
                     "INSERT INTO StringIds VALUES (?, ?)",
-                    (1, "void mla_kernel<float>()"),
+                    (1, "device_kernel"),
+                )
+                connection.execute(
+                    "INSERT INTO StringIds VALUES (?, ?)",
+                    (2, "void mla_kernel<float>()"),
                 )
                 connection.executemany(
                     "INSERT INTO CUDA_GRAPH_NODE_EVENTS VALUES (?, ?)",
@@ -63,6 +68,7 @@ class TestProfileGraphMap(unittest.TestCase):
                     9,
                     42,
                     1,
+                    2,
                     11,
                     1,
                     1,
@@ -73,7 +79,7 @@ class TestProfileGraphMap(unittest.TestCase):
                 )
                 connection.executemany(
                     "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES "
-                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     [kernel_row, (300, 500, *kernel_row[2:])],
                 )
 

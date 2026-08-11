@@ -154,6 +154,7 @@ def _register_deep_gemm_mxfp8_fp4_profile_impl() -> None:
         ),
         expected_symbols=(
             "sm100_fp8_fp4_gemm_1d1d_impl",
+            "sm90_fp8_gemm_1d2d_impl",
             "nvjet_sm100",
             "per_token_group_quant_flat_kernel",
             "splitKreduce_kernel",

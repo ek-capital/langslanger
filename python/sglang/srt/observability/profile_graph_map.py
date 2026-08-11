@@ -23,6 +23,7 @@ _KERNEL_TABLE = "CUPTI_ACTIVITY_KIND_KERNEL"
 _NODE_TABLE = "CUDA_GRAPH_NODE_EVENTS"
 _STRING_TABLE = "StringIds"
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_GENERIC_KERNEL_SHORT_NAMES = frozenset({"device_kernel"})
 
 
 def analyze_graph_sqlite(
@@ -326,17 +327,7 @@ def _read_graph_kernels(connection, columns, strings):
     query += f" FROM {_quote_identifier(_KERNEL_TABLE)}"
     rows = []
     for row in connection.execute(query):
-        raw_name = next(
-            (
-                row[name]
-                for name in ("shortName", "demangledName", "mangledName")
-                if name in row.keys() and row[name] is not None
-            ),
-            None,
-        )
-        symbol = (
-            strings.get(raw_name, str(raw_name)) if raw_name is not None else "unknown"
-        )
+        symbol = _kernel_symbol(row, strings)
         rows.append(
             {
                 "start_ns": int(row["start"]),
@@ -352,6 +343,31 @@ def _read_graph_kernels(connection, columns, strings):
             }
         )
     return rows
+
+
+def _kernel_symbol(row: sqlite3.Row, strings: dict[int, str]) -> str:
+    names = {}
+    for column in ("shortName", "demangledName", "mangledName"):
+        if column not in row.keys() or row[column] is None:
+            continue
+        raw_name = row[column]
+        if raw_name in strings:
+            names[column] = strings[raw_name]
+        elif isinstance(raw_name, str):
+            names[column] = raw_name
+        else:
+            names[column] = str(raw_name)
+
+    short_name = names.get("shortName")
+    if short_name and short_name.lower() in _GENERIC_KERNEL_SHORT_NAMES:
+        # Nsight labels templated CUTLASS launches as just ``device_kernel`` in
+        # shortName.  Its demangledName carries the operation and data types
+        # needed for source attribution.
+        for column in ("demangledName", "mangledName"):
+            informative_name = names.get(column)
+            if informative_name and informative_name.lower() != short_name.lower():
+                return informative_name
+    return next(iter(names.values()), "unknown")
 
 
 def _launch_shape(row: sqlite3.Row) -> str | None:

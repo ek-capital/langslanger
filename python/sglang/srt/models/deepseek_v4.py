@@ -2763,6 +2763,7 @@ class DeepseekV4ForCausalLM(nn.Module):
                 "mhc_post",
                 "mhc_fused_post_pre",
                 "sm100_tf32_hc_prenorm_gemm",
+                "sm90_tf32_hc_prenorm_gemm_impl",
             ),
             loaded_modules=("sglang", "tilelang", "aiter", "torch_npu"),
             conditions={

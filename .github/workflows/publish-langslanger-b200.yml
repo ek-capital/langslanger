@@ -1,0 +1,95 @@
+name: Publish LangSlanger B200 warm image
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Immutable image tag
+        required: true
+        default: deepseek-v4-flash-b200-20260811
+        type: string
+  push:
+    branches:
+      - codex/profile-model-attribution
+    paths:
+      - .github/workflows/publish-langslanger-b200.yml
+      - docker/langslanger-b200.Dockerfile
+      - docker/precompile_deepseek_v4_sm100.py
+      - python/**
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-langslanger-b200-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+  DEFAULT_TAG: deepseek-v4-flash-b200-20260811
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Select immutable tag
+        id: metadata
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG="${REQUESTED_TAG:-${DEFAULT_TAG}}"
+          if [[ ! "${TAG}" =~ ^[a-z0-9][a-z0-9._-]{0,127}$ ]]; then
+            echo "Invalid OCI tag: ${TAG}" >&2
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build and publish warmed linux/amd64 image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/langslanger-b200.Dockerfile
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            SOURCE_COMMIT=${{ github.sha }}
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.metadata.outputs.tag }}
+            ${{ env.IMAGE }}:b200-nightly
+            ${{ env.IMAGE }}:sha-${{ github.sha }}
+          cache-from: type=gha,scope=langslanger-b200
+          cache-to: type=gha,mode=max,scope=langslanger-b200
+          provenance: mode=max
+          sbom: true
+
+      - name: Verify published manifest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAG: ${{ steps.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "${IMAGE}:${TAG}@${DIGEST}"
+          {
+            echo "### Published B200 image"
+            echo
+            echo "- Image: \`${IMAGE}:${TAG}\`"
+            echo "- Moving alias: \`${IMAGE}:b200-nightly\`"
+            echo "- Digest: \`${DIGEST}\`"
+            echo "- Source: \`${GITHUB_SHA}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"

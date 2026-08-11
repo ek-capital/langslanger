@@ -245,7 +245,7 @@ def _is_trivial_parallel_state(ps: ParallelState) -> bool:
             ps.attn_dp_size,
             ps.moe_ep_size,
             ps.moe_dp_size,
-            ps.dcp_size,
+            ps.attn_dcp_size,
         )
     )
 

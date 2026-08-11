@@ -51,9 +51,9 @@ WORKFLOWS = {
             "base-b-test-4-gpu-b200",
             "base-c-test-8-gpu-h200",
             "base-c-test-8-gpu-h20",
-            "base-c-test-deepep-4-gpu-b200",
-            "base-c-test-deepep-8-gpu-h200",
             "base-c-test-4-gpu-b200",
+            "base-c-test-4-gpu-gb300",
+            "base-c-test-8-gpu-b300",
         ),
     },
     "pr-test-extra.yml": {
@@ -61,8 +61,6 @@ WORKFLOWS = {
         "unsupported_jobs": (
             "extra-b-test-4-gpu-b200",
             "extra-b-test-8-gpu-h200",
-            "extra-b-test-deepep-4-gpu-b200",
-            "extra-b-test-deepep-8-gpu-h200",
         ),
     },
     "pr-test-jit-kernel.yml": {
@@ -198,7 +196,6 @@ class TestLangSlangerCIHardwarePolicy(unittest.TestCase):
             "1-gpu-large": "1-gpu-h100",
             "2-gpu-large": "2-gpu-h100",
             "4-gpu-h100": "4-gpu-h100",
-            "deepep-4-gpu-h100": "4-gpu-h100",
         }
         for runner_config, runner_label in expected.items():
             with self.subTest(runner_config=runner_config):

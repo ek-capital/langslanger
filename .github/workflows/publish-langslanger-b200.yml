@@ -8,14 +8,6 @@ on:
         required: true
         default: deepseek-v4-flash-b200-20260811
         type: string
-  push:
-    branches:
-      - codex/profile-model-attribution
-    paths:
-      - .github/workflows/publish-langslanger-b200.yml
-      - docker/langslanger-b200.Dockerfile
-      - docker/precompile_deepseek_v4_sm100.py
-      - python/**
 
 permissions:
   contents: read
@@ -73,8 +65,6 @@ jobs:
             ${{ env.IMAGE }}:${{ steps.metadata.outputs.tag }}
             ${{ env.IMAGE }}:b200-nightly
             ${{ env.IMAGE }}:sha-${{ github.sha }}
-          cache-from: type=gha,scope=langslanger-b200
-          cache-to: type=gha,mode=max,scope=langslanger-b200
           provenance: mode=max
           sbom: true
 

@@ -40,6 +40,26 @@ SGLang module names, existing flags, configuration keys, environment variables,
 metrics, and APIs are intentionally retained for compatibility. New
 LangSlanger-only controls use the `langslanger` namespace.
 
+## Run from an official SGLang image without reinstalling dependencies
+
+Use an image's coherent prebuilt CUDA stack and overlay only the LangSlanger
+checkout. This avoids compiling or replacing Torch, SGLang kernels, FlashInfer,
+DeepEP, or DeepGEMM on an expensive GPU instance:
+
+```bash
+git clone https://github.com/KineticCapital/langslanger.git /workspace/langslanger
+/workspace/langslanger/scripts/run_source_overlay.sh \
+  --model-path /workspace/models/your-model \
+  --tp 8
+```
+
+The launcher accepts the official SGLang v0.5.16 image band (Torch 2.11,
+`sglang-kernel` 0.4.5, and FlashInfer 0.6.14) as well as LangSlanger's current
+band. It rejects mixed binary bands because upgrading one compiled wheel can
+produce a C++ ABI mismatch. Set `LANGSLANGER_STRICT_RUNTIME_VERSIONS=1` to
+require only the current LangSlanger band. The upstream emergency bypass
+`SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK=1` remains unchanged.
+
 LangSlanger is an independent fork and is not affiliated with or endorsed by
 the SGLang project. See [ATTRIBUTION.md](ATTRIBUTION.md) for provenance and
 licensing details.

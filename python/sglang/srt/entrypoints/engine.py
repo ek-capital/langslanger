@@ -99,13 +99,12 @@ from sglang.srt.observability.trace import process_tracing_init, trace_set_threa
 from sglang.srt.parser.template_detection import resolve_auto_parsers
 from sglang.srt.parser.template_manager import TemplateManager
 from sglang.srt.plugins import load_plugins
+from sglang.srt.runtime_compatibility import validate_cuda_runtime_band
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import (
     MultiprocessingSerializer,
     SerializedTensorPayload,
-    assert_pkg_version,
     configure_logger,
-    get_bool_env_var,
     is_cuda,
     is_mnnvl_fabric_device,
     kill_process_tree,
@@ -1648,22 +1647,15 @@ def _set_envs_and_config(server_args: ServerArgs):
     # Set ulimit
     set_ulimit()
 
-    # Check flashinfer version
-    if not get_bool_env_var("SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK"):
-        if server_args.attention_backend == "flashinfer":
-            assert_pkg_version(
-                "flashinfer_python",
-                "0.6.15.post1",
-                "Please uninstall the old version and "
-                "reinstall the latest version by following the instructions "
-                "at https://docs.flashinfer.ai/installation.html.",
-            )
-        if _is_cuda:
-            assert_pkg_version(
-                "sglang-kernel",
-                "0.4.6.post1",
-                "Please reinstall the latest version with `pip install sglang-kernel --force-reinstall`",
-            )
+    # Validate the complete binary runtime band. Binary packages compiled against
+    # one PyTorch ABI must not be upgraded independently inside a prebuilt image.
+    if _is_cuda and not envs.SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK.get():
+        runtime_band = validate_cuda_runtime_band(
+            torch.__version__,
+            attention_backend=server_args.attention_backend,
+            strict_current=envs.LANGSLANGER_STRICT_RUNTIME_VERSIONS.get(),
+        )
+        logger.info("Using LangSlanger CUDA runtime band: %s", runtime_band.name)
 
     # Signal handlers can only be registered from the main thread.
     if threading.current_thread() is threading.main_thread():

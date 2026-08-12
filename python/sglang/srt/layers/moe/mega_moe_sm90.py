@@ -20,6 +20,10 @@ from typing import TYPE_CHECKING
 import torch
 
 from sglang.srt.environ import envs
+from sglang.srt.layers.moe.mega_moe_capabilities import (
+    missing_sm90_fp8_mega_moe_symbols,
+    require_sm90_fp8_mega_moe_capabilities,
+)
 from sglang.srt.models.deepseek_common.utils import _device_sm
 
 if TYPE_CHECKING:
@@ -35,11 +39,10 @@ def is_sm90_fp8_mega_moe_available(experts) -> bool:
         import deep_gemm
     except ImportError:
         return False
-    return (
-        hasattr(deep_gemm, "fp8_mega_moe")
-        and hasattr(deep_gemm, "mega_moe_pre_dispatch_sm90")
-        and getattr(experts, "_mega_moe_sm90_fp8_weights", False)
-    )
+    return not missing_sm90_fp8_mega_moe_symbols(
+        deep_gemm,
+        use_in_place_weights=envs.SGLANG_OPT_FIX_MEGA_MOE_MEMORY.get(),
+    ) and getattr(experts, "_mega_moe_sm90_fp8_weights", False)
 
 
 def run_sm90_mega_routed(
@@ -102,6 +105,19 @@ def build_sm90_mega_moe_experts_weights(experts) -> None:
     if getattr(experts, "_mega_moe_weights_built", False):
         return
 
+    try:
+        import deep_gemm
+    except ImportError as exc:
+        raise RuntimeError(
+            "MegaMoE on SM90 requires DeepGEMM from a compatible prebuilt runtime "
+            "band."
+        ) from exc
+
+    use_in_place_weights = envs.SGLANG_OPT_FIX_MEGA_MOE_MEMORY.get()
+    require_sm90_fp8_mega_moe_capabilities(
+        deep_gemm, use_in_place_weights=use_in_place_weights
+    )
+
     w13 = experts.w13_weight.data
     w13_sf_fp32 = experts.w13_weight_scale_inv.data
     w2 = experts.w2_weight.data
@@ -139,7 +155,7 @@ def build_sm90_mega_moe_experts_weights(experts) -> None:
         f"expected {expected_k_groups_2} (k2={k2}, group_k={scale_group_k})"
     )
 
-    if envs.SGLANG_OPT_FIX_MEGA_MOE_MEMORY.get():
+    if use_in_place_weights:
         w13_interleaved = _interleave_l1_weight_only(w13)
         experts.w13_weight.data = w13_interleaved
         experts.mega_l1_weights = (
@@ -151,8 +167,6 @@ def build_sm90_mega_moe_experts_weights(experts) -> None:
             experts.w2_weight_scale_inv.data,
         )
     else:
-        import deep_gemm
-
         w13_sf = deep_gemm.transform_sf_into_required_layout(
             w13_sf_fp32,
             mn=n1,

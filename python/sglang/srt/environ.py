@@ -881,6 +881,9 @@ class Envs:
 
     # sgl-kernel
     SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK = EnvBool(False)
+    # Require the current LangSlanger binary band instead of also accepting the
+    # supported official-SGLang-image source-overlay band.
+    LANGSLANGER_STRICT_RUNTIME_VERSIONS = EnvBool(False)
 
     # Flash Attention
     SGLANG_USE_SGL_FA3_KERNEL = EnvBool(True)

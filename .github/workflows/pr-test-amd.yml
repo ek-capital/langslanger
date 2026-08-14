@@ -1,4 +1,4 @@
-name: PR Test (AMD)
+name: PR Test ROCm 7.0 (AMD)
 # Dynamic run-name for /rerun-stage commands to enable URL lookup
 # Format: "[stage-name] sha" for fork PRs, "[stage-name]" for non-fork, default for normal runs
 run-name: ${{ (inputs.target_stage || inputs.target_stage_select) && (inputs.pr_head_sha && format('[{0}] {1}', inputs.target_stage || inputs.target_stage_select, inputs.pr_head_sha) || format('[{0}]', inputs.target_stage || inputs.target_stage_select)) || '' }}
@@ -214,6 +214,8 @@ jobs:
     uses: ./.github/workflows/pr-test-amd-extra.yml
     with:
       ref: ${{ inputs.pr_head_sha || inputs.ref || '' }}
+      runner_arch: ${{ inputs.runner_arch || 'mi325' }}
+      rocm_version: rocm700
       aiter_ref: ${{ inputs.aiter_ref }}
       continue_on_error: true
     secrets: inherit
@@ -806,7 +808,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [0, 1, 2]  # 3 partitions: 2 parametrized + 1 standalone (single_test_file/test_disagg_server.py)
+        part: [0, 1, 2]  # run_suite.py load-balances the suite's parametrized cases and standalone files over these 3 partitions
     runs-on: ${{ format('linux-{0}-2gpu-sglang', inputs.runner_arch || 'mi325') }}
     steps:
       - name: Checkout code
@@ -1088,7 +1090,6 @@ jobs:
       RUNNER_LABELS: ${{ format('linux-{0}-8gpu-sglang', inputs.runner_arch || 'mi325') }}
     strategy:
       fail-fast: false
-      max-parallel: 2
       matrix:
         part: [0, 1, 2, 3]
     runs-on: ${{ format('linux-{0}-8gpu-sglang', inputs.runner_arch || 'mi325') }}

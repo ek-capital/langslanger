@@ -21,6 +21,7 @@ from sglang.srt.model_executor.forward_batch_info import (
 from sglang.srt.runtime_context import get_exec, get_parallel, get_spec
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.base_spec_worker import BaseSpecWorker
+from sglang.srt.speculative.cpp_ngram.ngram_corpus import NgramCorpus
 from sglang.srt.speculative.dflash_info_v2 import DFlashDraftInputV2
 from sglang.srt.speculative.draft_worker_common import (
     build_block_pos_offsets,
@@ -69,6 +70,10 @@ from sglang.srt.speculative.spec_utils import (
 from sglang.srt.utils import get_available_gpu_memory, is_cuda
 
 logger = logging.getLogger(__name__)
+
+_NGRAM_ROUTER_MAX_DEPTH = 10
+_NGRAM_ROUTER_MIN_MATCH = 3
+_NGRAM_ROUTER_MIN_CONTINUATION = 2
 
 
 class DSparkWorkerV2(BaseSpecWorker):
@@ -153,6 +158,17 @@ class DSparkWorkerV2(BaseSpecWorker):
         self.verify_num_draft_tokens = runtime_config.verify_num_draft_tokens
         self.speculative_num_draft_tokens = self.verify_num_draft_tokens
         self._mask_token_id = runtime_config.mask_token_id
+        self._ngram_router = None
+        self._ngram_prefilled_rids = set()
+        if server_args.speculative_dspark_ngram_router:
+            self._ngram_router = NgramCorpus(
+                max_trie_depth=_NGRAM_ROUTER_MAX_DEPTH,
+                min_bfs_breadth=1,
+                max_bfs_breadth=1,
+                draft_token_num=self.verify_num_draft_tokens,
+                match_type="BFS",
+                capacity=server_args.speculative_ngram_capacity,
+            )
 
         parallel = get_parallel()
         self._tp_sync = DsparkTpSync(
@@ -399,7 +415,9 @@ class DSparkWorkerV2(BaseSpecWorker):
         )
 
     def clear_cache_pool(self):
-        pass
+        if self._ngram_router is not None:
+            self._ngram_router.reset()
+            self._ngram_prefilled_rids.clear()
 
     def set_dspark_forced_budget_frac(self, frac: Optional[float]) -> None:
         self._forced_budget_frac = frac
@@ -416,6 +434,9 @@ class DSparkWorkerV2(BaseSpecWorker):
 
     def note_request_finished(self, *, rid: str, natural_stop: bool) -> None:
         self._observers.note_request_finished(rid=rid, natural_stop=natural_stop)
+        if self._ngram_router is not None:
+            self._ngram_router.erase_match_state([rid])
+            self._ngram_prefilled_rids.discard(rid)
 
     def forward_batch_generation(
         self,
@@ -500,6 +521,7 @@ class DSparkWorkerV2(BaseSpecWorker):
             state_slot=state_slot,
             final_pos=final_pos,
         )
+        self._record_ngram_prefill_prompts(batch)
         # Avoid copying large hidden-state buffers to CPU in overlap scheduling.
         logits_output.hidden_states = None
 
@@ -613,6 +635,13 @@ class DSparkWorkerV2(BaseSpecWorker):
         draft_block = proposal.draft_block
         draft_tokens = draft_block.draft_tokens
 
+        ngram_continuation_lens = self._apply_ngram_drafts(
+            batch=batch,
+            draft_input=draft_input,
+            draft_tokens=draft_tokens,
+            sampling_info=sampling_info,
+        )
+
         confidence = proposal.confidence
         if confidence is None:
             confidence = self._verify_planner.compute_confidence_tensor(
@@ -668,6 +697,7 @@ class DSparkWorkerV2(BaseSpecWorker):
             and verify_logits_adjustments_are_noop(sampling_info)
             and self._simulate_acc_len <= 0
             and not batch.has_grammar
+            and not any(ngram_continuation_lens)
         )
         prepare_mamba_track_for_verify(batch)
         with self._observers.segment(InfoSegment.TARGET_VERIFY):
@@ -706,6 +736,13 @@ class DSparkWorkerV2(BaseSpecWorker):
             )
             if grammar_mask is not None:
                 grammar_mask.apply(logits_output.next_token_logits)
+
+        self._cap_ngram_drafts(
+            continuation_lens=ngram_continuation_lens,
+            verify_ids_2d=verify_ids_2d,
+            draft_tokens=draft_tokens,
+            target_logits=logits_output.next_token_logits,
+        )
 
         epilogue = self._verify_executor.verify_epilogue
         folded_accept = fold_eligible and run_compact and can_run_cuda_graph
@@ -788,6 +825,143 @@ class DSparkWorkerV2(BaseSpecWorker):
             speculative_num_draft_tokens=int(self.verify_num_draft_tokens),
             new_seq_lens=accept.new_seq_lens,
         )
+
+    def _record_ngram_prefill_prompts(self, batch: ScheduleBatch) -> None:
+        if self._ngram_router is None:
+            return
+        prompts = []
+        for req in batch.reqs:
+            if req.rid in self._ngram_prefilled_rids:
+                continue
+            prompt = list(req.origin_input_ids)
+            if prompt:
+                prompts.append(prompt)
+                self._ngram_prefilled_rids.add(req.rid)
+        if prompts:
+            self._ngram_router.batch_put(prompts)
+
+    def _apply_ngram_drafts(
+        self,
+        *,
+        batch: ScheduleBatch,
+        draft_input: DFlashDraftInputV2,
+        draft_tokens: torch.Tensor,
+        sampling_info,
+    ) -> list[int]:
+        bs = len(batch.reqs)
+        continuation_lens = [0] * bs
+        if self._ngram_router is None or (
+            sampling_info is not None and not sampling_info.is_all_greedy
+        ) or self._simulate_acc_len > 0:
+            return continuation_lens
+
+        self._ngram_router.synchronize()
+        req_ids = [req.rid for req in batch.reqs]
+        # Request output bookkeeping can lag under overlap scheduling. Rebuild
+        # from the supplied tail instead of advancing stale match state.
+        self._ngram_router.erase_match_state(req_ids)
+
+        contexts = []
+        for i, req in enumerate(batch.reqs):
+            context = list(req.origin_input_ids) + list(req.output_ids)
+            anchor = int(draft_input.bonus_tokens[i])
+            if not context or context[-1] != anchor:
+                context.append(anchor)
+            contexts.append(context)
+
+        tails = [context[-_NGRAM_ROUTER_MAX_DEPTH :] for context in contexts]
+        retrieved, masks = self._ngram_router.batch_get(
+            req_ids=req_ids,
+            batch_tokens=tails,
+            total_lens=[len(context) for context in contexts],
+        )
+        width = self.verify_num_draft_tokens
+        retrieved = retrieved.reshape(bs, width)
+        masks = masks.reshape(bs, width, width)
+
+        for i, req in enumerate(batch.reqs):
+            # Width includes the current anchor at column zero. Padding rows
+            # point straight to the root, while a real linear continuation has
+            # an edge from each row to the preceding row.
+            if self.gamma < _NGRAM_ROUTER_MIN_CONTINUATION or not masks[i, 2, 1]:
+                continue
+            continuation_len = _NGRAM_ROUTER_MIN_CONTINUATION
+            while (
+                continuation_len < self.gamma
+                and masks[i, continuation_len + 1, continuation_len]
+            ):
+                continuation_len += 1
+            continuation = retrieved[i, 1 : continuation_len + 1].tolist()
+            continuation_len = self._request_scoped_continuation_len(
+                prompt=list(req.origin_input_ids),
+                context=contexts[i],
+                continuation=continuation,
+            )
+            if continuation_len < _NGRAM_ROUTER_MIN_CONTINUATION:
+                continue
+            draft_tokens[i, :continuation_len].copy_(
+                torch.tensor(
+                    continuation[:continuation_len],
+                    dtype=draft_tokens.dtype,
+                    device=draft_tokens.device,
+                )
+            )
+            continuation_lens[i] = continuation_len
+        return continuation_lens
+
+    @staticmethod
+    def _request_scoped_continuation_len(
+        *, prompt: list[int], context: list[int], continuation: list[int]
+    ) -> int:
+        """Reject cross-request trie hits and enforce the fixed match threshold."""
+        max_match = min(_NGRAM_ROUTER_MAX_DEPTH, len(context))
+        for match_len in range(max_match, _NGRAM_ROUTER_MIN_MATCH - 1, -1):
+            suffix = context[-match_len:]
+            last_start = len(prompt) - match_len - _NGRAM_ROUTER_MIN_CONTINUATION
+            for start in range(last_start, -1, -1):
+                if prompt[start : start + match_len] != suffix:
+                    continue
+                prompt_continuation = prompt[
+                    start + match_len : start + match_len + len(continuation)
+                ]
+                common = 0
+                for expected, actual in zip(continuation, prompt_continuation):
+                    if expected != actual:
+                        break
+                    common += 1
+                if common >= _NGRAM_ROUTER_MIN_CONTINUATION:
+                    return common
+        return 0
+
+    def _cap_ngram_drafts(
+        self,
+        *,
+        continuation_lens: list[int],
+        verify_ids_2d: torch.Tensor,
+        draft_tokens: torch.Tensor,
+        target_logits: torch.Tensor,
+    ) -> None:
+        """Force the first post-retrieval candidate to miss on greedy requests."""
+        rows = [
+            i
+            for i, continuation_len in enumerate(continuation_lens)
+            if 0 < continuation_len < self.gamma
+        ]
+        if not rows:
+            return
+        row_ids = torch.tensor(rows, dtype=torch.long, device=draft_tokens.device)
+        stop_positions = torch.tensor(
+            [continuation_lens[i] for i in rows],
+            dtype=torch.long,
+            device=draft_tokens.device,
+        )
+        logits = target_logits.view(
+            len(continuation_lens), self.verify_num_draft_tokens, -1
+        )
+        target_next = logits[row_ids, stop_positions].argmax(dim=-1)
+        forced_miss = torch.where(target_next == 0, 1, 0).to(draft_tokens.dtype)
+        verify_ids_2d[row_ids, stop_positions + 1] = forced_miss
+        draft_tokens[row_ids, stop_positions] = forced_miss
 
     def _commit_target_mamba_states_after_verify(
         self,

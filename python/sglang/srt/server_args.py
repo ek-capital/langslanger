@@ -2137,6 +2137,13 @@ class ServerArgs:
         "off the schedule is byte-for-byte unchanged.",
         NS("spec"),
     ] = False
+    speculative_dspark_ngram_router: A[
+        bool,
+        "Experimental DSPARK-only prompt NGRAM router. On an exact prompt suffix "
+        "match of at least 3 tokens, replace up to the current DSPARK block size "
+        "with a linear continuation of at least 2 prompt tokens. Greedy requests only.",
+        NS("spec"),
+    ] = False
     speculative_accept_threshold_single: A[
         float,
         "Accept a draft token if its probability in the target model is greater than this threshold.",

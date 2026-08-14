@@ -133,6 +133,58 @@ def is_deepseek_v4(config) -> bool:
     )
 
 
+def get_dsv4_indexcache_pattern(config: PretrainedConfig) -> Optional[str]:
+    """Return and validate the static fresh/skip pattern for DSV4 C4 indexers."""
+    if not is_deepseek_v4(config):
+        raise ValueError(
+            "--langslanger-dsv4-indexcache-pattern only supports DeepSeek V4 models"
+        )
+
+    pattern = getattr(config, "langslanger_dsv4_indexcache_pattern", None)
+    if pattern is None:
+        return None
+    if not isinstance(pattern, str):
+        raise ValueError(
+            "--langslanger-dsv4-indexcache-pattern must be a string of F and S"
+        )
+
+    compress_ratios = getattr(config, "compress_ratios", None) or []
+    num_c4_layers = sum(ratio == 4 for ratio in compress_ratios)
+    if len(pattern) != num_c4_layers:
+        raise ValueError(
+            "--langslanger-dsv4-indexcache-pattern must have one character per "
+            f"C4 indexer layer ({num_c4_layers}), got {len(pattern)}"
+        )
+    invalid = sorted(set(pattern) - {"F", "S"})
+    if invalid:
+        raise ValueError(
+            "--langslanger-dsv4-indexcache-pattern only accepts F and S, got "
+            + ", ".join(invalid)
+        )
+    if pattern and pattern[0] != "F":
+        raise ValueError(
+            "--langslanger-dsv4-indexcache-pattern must start with F so there "
+            "are fresh indices to reuse"
+        )
+    return pattern
+
+
+def dsv4_layer_skips_indexer(config: PretrainedConfig, layer_id: int) -> bool:
+    """Return whether this DSV4 C4 layer reuses the previous fresh indices."""
+    pattern = get_dsv4_indexcache_pattern(config)
+    if pattern is None:
+        return False
+
+    c4_layer_ids = [
+        i for i, ratio in enumerate(config.compress_ratios) if ratio == 4
+    ]
+    try:
+        c4_ordinal = c4_layer_ids.index(layer_id)
+    except ValueError as exc:
+        raise ValueError(f"DeepSeek V4 layer {layer_id} is not a C4 indexer layer") from exc
+    return pattern[c4_ordinal] == "S"
+
+
 def get_dsa_index_head_dim(config: PretrainedConfig) -> int:
     assert is_deepseek_dsa(config) or is_deepseek_v4(config)
     return config.index_head_dim
@@ -300,6 +352,10 @@ class ModelConfig:
             )
         )
         self.hf_text_config = get_hf_text_config(self.hf_config)
+        if getattr(
+            self.hf_text_config, "langslanger_dsv4_indexcache_pattern", None
+        ) is not None:
+            get_dsv4_indexcache_pattern(self.hf_text_config)
         self.is_embedding_gemma = is_embedding_gemma(self.hf_text_config)
         self.embedding_model_spec = resolve_embedding_model_spec(
             self.hf_config.architectures,
@@ -560,6 +616,16 @@ class ModelConfig:
             if is_draft_model
             else server_args.decrypted_config_file
         )
+        model_override_args = server_args.json_model_override_args
+        if (
+            not is_draft_model
+            and server_args.langslanger_dsv4_indexcache_pattern is not None
+        ):
+            parsed_override_args = json.loads(model_override_args)
+            parsed_override_args["langslanger_dsv4_indexcache_pattern"] = (
+                server_args.langslanger_dsv4_indexcache_pattern
+            )
+            model_override_args = json.dumps(parsed_override_args)
         return ModelConfig(
             model_path=model_path or server_args.model_path,
             trust_remote_code=server_args.trust_remote_code,
@@ -569,7 +635,7 @@ class ModelConfig:
                 if context_length is not None
                 else server_args.context_length
             ),
-            model_override_args=server_args.json_model_override_args,
+            model_override_args=model_override_args,
             is_embedding=server_args.is_embedding,
             enable_multimodal=server_args.enable_multimodal,
             dtype=server_args.dtype,

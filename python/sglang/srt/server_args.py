@@ -630,6 +630,15 @@ class ServerArgs:
         "A dictionary in JSON string format used to override default model configurations.",
         NS("model"),
     ] = "{}"
+    langslanger_dsv4_indexcache_pattern: A[
+        Optional[str],
+        (
+            "Experimental DeepSeek V4 IndexCache pattern over C4 indexer layers. "
+            "Use F to compute fresh sparse indices and S to reuse the previous "
+            "fresh indices. The first character must be F."
+        ),
+        NS("model"),
+    ] = None
 
     # -------------------------------------------------------------------------
     # Quantization and data type
@@ -8416,6 +8425,34 @@ class ServerArgs:
             )
 
     def _handle_other_validations(self):
+        if self.langslanger_dsv4_indexcache_pattern is not None:
+            from sglang.srt.configs.model_config import (
+                get_dsv4_indexcache_pattern,
+                is_deepseek_v4,
+            )
+
+            model_config = self.get_model_config()
+            if not is_deepseek_v4(model_config.hf_text_config):
+                raise ValueError(
+                    "--langslanger-dsv4-indexcache-pattern only supports "
+                    "DeepSeek V4 models"
+                )
+            get_dsv4_indexcache_pattern(model_config.hf_text_config)
+            if self.pp_size > 1:
+                raise ValueError(
+                    "--langslanger-dsv4-indexcache-pattern currently requires --pp 1"
+                )
+            if self.enable_two_batch_overlap:
+                raise ValueError(
+                    "--langslanger-dsv4-indexcache-pattern currently requires "
+                    "two-batch overlap to be disabled"
+                )
+            if self.enable_hisparse:
+                raise ValueError(
+                    "--langslanger-dsv4-indexcache-pattern currently requires "
+                    "HiSparse to be disabled"
+                )
+
         if self.default_chat_template_kwargs is not None and not isinstance(
             self.default_chat_template_kwargs, dict
         ):

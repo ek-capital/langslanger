@@ -34,6 +34,7 @@ from sglang.kernels.ops.quantization.fp8_kernel import (
 )
 from sglang.srt.compilation.compilation_config import register_split_op
 from sglang.srt.configs.deepseek_v4 import DeepSeekV4Config
+from sglang.srt.configs.model_config import dsv4_layer_skips_indexer
 from sglang.srt.distributed import (
     get_pp_group,
     get_tp_group,
@@ -748,6 +749,7 @@ class MQALayer(MqaAttentionBase):
 
         self.compressor = None
         self.indexer = None
+        self.skip_indexer = False
         if self.compress_ratio in (4, 128):
             self.compressor = Compressor(
                 config,
@@ -770,6 +772,7 @@ class MQALayer(MqaAttentionBase):
                     alt_streams=self.alt_streams_indexer,
                     rotary_emb=self.rotary_emb,
                 )
+                self.skip_indexer = dsv4_layer_skips_indexer(config, self.layer_id)
 
         self.attn_mqa = RadixAttention(
             self.n_local_heads,
@@ -924,7 +927,7 @@ class MQALayer(MqaAttentionBase):
         q_lora = self._compute_q_a(x_linear, qkv_a=qkv_a)
         q_lora_ready = current_stream.record_event()
 
-        if self.indexer is not None:
+        if self.indexer is not None and not self.skip_indexer:
             with torch.cuda.stream(stream_indexer):
                 self.indexer(
                     x=x,
@@ -984,7 +987,11 @@ class MQALayer(MqaAttentionBase):
                     x, forward_batch, self.layer_id, self.compressor
                 )
 
-        if self.indexer is not None and stream_indexer_compressor is not None:
+        if (
+            self.indexer is not None
+            and not self.skip_indexer
+            and stream_indexer_compressor is not None
+        ):
             stream_indexer_compressor.wait_stream(current_stream)
             with torch.cuda.stream(stream_indexer_compressor):
                 attn_backend.forward_indexer_compressor(
@@ -1055,7 +1062,7 @@ class MQALayer(MqaAttentionBase):
 
         del qkv_a
 
-        if self.indexer is not None:
+        if self.indexer is not None and not self.skip_indexer:
             current_stream.wait_stream(stream_compressor)
             if stream_indexer_compressor is not None:
                 current_stream.wait_stream(stream_indexer_compressor)
@@ -1239,7 +1246,7 @@ class MQALayer(MqaAttentionBase):
 
         del qkv_a
 
-        if self.indexer is not None:
+        if self.indexer is not None and not self.skip_indexer:
             self.indexer(
                 x=x,
                 q_lora=q_lora,

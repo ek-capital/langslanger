@@ -17,6 +17,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from sglang.kernels.ops.attention.dsv4 import (
+    fused_rope_inplace,
     fused_q_indexer_rope_hadamard_fp4_quant,
     fused_q_indexer_rope_hadamard_quant,
     topk_transform_512,
@@ -480,6 +481,80 @@ class C4IndexerBackendMixin:
             )
         return q, weights
 
+    def _get_pivot_reuse_prefill_plan(
+        self,
+        *,
+        c4_indexer: C4Indexer,
+        forward_batch: ForwardBatch,
+        indexer_metadata: PagedIndexerMetadata,
+        num_queries: int,
+    ) -> Optional[Tuple[int, torch.Tensor, torch.Tensor]]:
+        """Build the fixed-g=4, single-request eager PIVOT-Reuse mapping."""
+        group_size = c4_indexer.pivot_group_size
+        if group_size == 1:
+            return None
+        if (
+            forward_batch.forward_mode != ForwardMode.EXTEND
+            or c4_indexer.use_fp4_indexer
+            or get_global_indexer_capturer() is not None
+            or not self._can_use_nonpaged_indexer(
+                c4_indexer=c4_indexer,
+                forward_batch=forward_batch,
+                indexer_metadata=indexer_metadata,
+            )
+            or forward_batch.seq_lens_cpu is None
+            or forward_batch.extend_seq_lens_cpu is None
+        ):
+            return None
+
+        seq_lens = [int(value) for value in forward_batch.seq_lens_cpu]
+        extend_lens = [int(value) for value in forward_batch.extend_seq_lens_cpu]
+        if (
+            len(seq_lens) != 1
+            or len(extend_lens) != 1
+            or seq_lens[0] < 32 * 1024
+            or extend_lens[0] != num_queries
+        ):
+            return None
+
+        grouped_rows = num_queries - num_queries % group_size
+        if grouped_rows == 0:
+            return None
+
+        device = indexer_metadata.c4_seq_lens.device
+        group_count = grouped_rows // group_size
+        proxy_rows = torch.cat(
+            (
+                torch.arange(
+                    0,
+                    grouped_rows,
+                    group_size,
+                    dtype=torch.long,
+                    device=device,
+                ),
+                torch.arange(
+                    grouped_rows,
+                    num_queries,
+                    dtype=torch.long,
+                    device=device,
+                ),
+            )
+        )
+        expand_rows = torch.cat(
+            (
+                torch.arange(group_count, dtype=torch.long, device=device).repeat_interleave(
+                    group_size
+                ),
+                torch.arange(
+                    group_count,
+                    group_count + num_queries - grouped_rows,
+                    dtype=torch.long,
+                    device=device,
+                ),
+            )
+        )
+        return grouped_rows, proxy_rows, expand_rows
+
     def _can_use_nonpaged_indexer(
         self,
         *,
@@ -528,8 +603,16 @@ class C4IndexerBackendMixin:
         page_table: torch.Tensor,
         c4_seq_lens: torch.Tensor,
         query_rows: int,
+        original_query_rows: Optional[int] = None,
+        pivot_reuse: bool = False,
     ) -> Optional[NonPagedIndexerPlan]:
-        if query_rows < envs.SGLANG_OPT_DSV4_NONPAGED_INDEXER_MIN_QUERY_TOKENS.get():
+        if original_query_rows is None:
+            original_query_rows = query_rows
+        if (
+            not pivot_reuse
+            and original_query_rows
+            < envs.SGLANG_OPT_DSV4_NONPAGED_INDEXER_MIN_QUERY_TOKENS.get()
+        ):
             return None
         if not self._can_use_nonpaged_indexer(
             c4_indexer=c4_indexer,
@@ -570,8 +653,8 @@ class C4IndexerBackendMixin:
 
         actual_queries = extend_lens_cpu[0]
         if (
-            actual_queries != query_rows
-            or int(forward_batch.extend_num_tokens) != query_rows
+            actual_queries != original_query_rows
+            or int(forward_batch.extend_num_tokens) != original_query_rows
             or forward_batch.seq_lens.numel() != 1
             or forward_batch.extend_seq_lens.numel() != 1
             or forward_batch.extend_start_loc.numel() != 1
@@ -675,7 +758,32 @@ class C4IndexerBackendMixin:
         if positions.shape[0] != num_queries:
             positions = positions[:num_queries]
 
-        if enable_multi_stream:
+        pivot_plan = self._get_pivot_reuse_prefill_plan(
+            c4_indexer=c4_indexer,
+            forward_batch=forward_batch,
+            indexer_metadata=indexer_metadata,
+            num_queries=num_queries,
+        )
+
+        if pivot_plan is not None:
+            grouped_rows, pivot_proxy_rows, pivot_expand_rows = pivot_plan
+            if q_lora_ready is not None:
+                torch.cuda.current_stream().wait_event(q_lora_ready)
+            weights = c4_indexer.compute_weights(x, skip_scale=True)
+            q_indexer, weights = c4_indexer.compute_q_pivot_reuse(
+                q_lora,
+                positions,
+                weights,
+                grouped_rows=grouped_rows,
+            )
+            if not skip_compressor:
+                self.forward_indexer_compressor(
+                    x=x,
+                    forward_batch=forward_batch,
+                    layer_id=c4_indexer.layer_id,
+                    compressor=c4_indexer.compressor,
+                )
+        elif enable_multi_stream:
             q_indexer, weights = self._forward_prepare_multi_stream(
                 x=x,
                 q_lora=q_lora,
@@ -736,20 +844,32 @@ class C4IndexerBackendMixin:
 
         query_rows = q_indexer[0].shape[0] if use_fp4_indexer else q_indexer.shape[0]
 
-        def match_num_queries(tensor: torch.Tensor, value: int) -> torch.Tensor:
-            if tensor.shape[0] == query_rows:
+        def match_num_queries(
+            tensor: torch.Tensor, value: int, rows: int
+        ) -> torch.Tensor:
+            if tensor.shape[0] == rows:
                 return tensor
-            if tensor.shape[0] > query_rows:
-                return tensor[:query_rows]
-            pad = (0, 0) * (tensor.dim() - 1) + (0, query_rows - tensor.shape[0])
+            if tensor.shape[0] > rows:
+                return tensor[:rows]
+            pad = (0, 0) * (tensor.dim() - 1) + (0, rows - tensor.shape[0])
             return F.pad(tensor, pad, value=value)
 
-        c4_seq_lens = match_num_queries(indexer_metadata.c4_seq_lens, value=1)
-        _c4sl = c4_seq_lens
-        page_table = match_num_queries(indexer_metadata.page_table, value=0)
-        c4_sparse_page_indices = match_num_queries(
-            core_metadata.c4_sparse_page_indices, value=-1
+        original_query_rows = num_queries if pivot_plan is not None else query_rows
+        c4_seq_lens = match_num_queries(
+            indexer_metadata.c4_seq_lens, value=1, rows=original_query_rows
         )
+        page_table = match_num_queries(
+            indexer_metadata.page_table, value=0, rows=original_query_rows
+        )
+        c4_sparse_page_indices = match_num_queries(
+            core_metadata.c4_sparse_page_indices,
+            value=-1,
+            rows=original_query_rows,
+        )
+        if pivot_plan is not None:
+            c4_seq_lens = c4_seq_lens[pivot_proxy_rows]
+            page_table = page_table[pivot_proxy_rows]
+        _c4sl = c4_seq_lens
         _use_tilelang = (
             envs.SGLANG_OPT_USE_TILELANG_INDEXER.get() and not use_fp4_indexer
         )
@@ -763,6 +883,8 @@ class C4IndexerBackendMixin:
             page_table=page_table,
             c4_seq_lens=c4_seq_lens,
             query_rows=query_rows,
+            original_query_rows=original_query_rows,
+            pivot_reuse=pivot_plan is not None,
         )
         if nonpaged_plan is not None:
             assert isinstance(q_indexer, torch.Tensor)
@@ -813,7 +935,22 @@ class C4IndexerBackendMixin:
                 : c4_sparse_page_indices.size(0)
             ]
         elif core_metadata.c4_sparse_raw_indices is not None:
-            raw_indices = core_metadata.c4_sparse_raw_indices
+            raw_indices = match_num_queries(
+                core_metadata.c4_sparse_raw_indices,
+                value=-1,
+                rows=original_query_rows,
+            )
+
+        topk_page_indices = c4_sparse_page_indices
+        topk_raw_indices = raw_indices
+        if pivot_plan is not None:
+            topk_page_indices = torch.empty(
+                (query_rows, c4_sparse_page_indices.shape[1]),
+                dtype=c4_sparse_page_indices.dtype,
+                device=c4_sparse_page_indices.device,
+            )
+            if raw_indices is not None:
+                topk_raw_indices = torch.empty_like(topk_page_indices)
 
         if (
             envs.SGLANG_TOPK_TRANSFORM_512_TORCH.get()
@@ -823,20 +960,24 @@ class C4IndexerBackendMixin:
                 logits,
                 c4_seq_lens,
                 page_table,
-                c4_sparse_page_indices,
+                topk_page_indices,
                 indexer_metadata.c4_page_size,
-                raw_indices,
+                topk_raw_indices,
             )
         elif self.dsa_topk_backend.is_flashinfer():
             topk_transform_512_flashinfer_unfused(
                 logits,
                 c4_seq_lens,
                 page_table,
-                c4_sparse_page_indices,
+                topk_page_indices,
                 indexer_metadata.c4_page_size,
-                raw_indices,
+                topk_raw_indices,
             )
-        elif envs.SGLANG_OPT_USE_TOPK_V2.get() and raw_indices is None:
+        elif (
+            pivot_plan is None
+            and envs.SGLANG_OPT_USE_TOPK_V2.get()
+            and raw_indices is None
+        ):
             topk_transform_512_v2(
                 logits,
                 c4_seq_lens,
@@ -850,10 +991,16 @@ class C4IndexerBackendMixin:
                 logits,
                 c4_seq_lens,
                 page_table,
-                c4_sparse_page_indices,
+                topk_page_indices,
                 indexer_metadata.c4_page_size,
-                raw_indices,
+                topk_raw_indices,
             )
+        if pivot_plan is not None:
+            # The C4 proxy top-k is shared. DSV4's separate SWA path remains
+            # per-query, preserving its local window and causal mask.
+            c4_sparse_page_indices.copy_(topk_page_indices[pivot_expand_rows])
+            if raw_indices is not None:
+                raw_indices.copy_(topk_raw_indices[pivot_expand_rows])
         if hisparse_coordinator is not None:
             if hisparse_decode:
                 compress_layer_id = token_to_kv_pool.layer_mapping[
@@ -935,6 +1082,11 @@ class C4Indexer(nn.Module):
         self.weight_scale: float = self.softmax_scale * self.n_heads**-0.5
 
         self.use_fp4_indexer = get_exec().kernel.enable_deepseek_v4_fp4_indexer
+        self.pivot_group_size = envs.SGLANG_DSV4_PIVOT_GROUP_SIZE.get()
+        if self.pivot_group_size not in (1, 4):
+            raise ValueError(
+                "SGLANG_DSV4_PIVOT_GROUP_SIZE supports only 1 (off) or 4"
+            )
         self.alt_streams = alt_streams
         self._register_profile_implementation()
 
@@ -1017,6 +1169,52 @@ class C4Indexer(nn.Module):
         if not skip_scale:
             out = out * self.weight_scale
         return out
+
+    def compute_q_pivot_reuse(
+        self,
+        q_lora: torch.Tensor,
+        positions: torch.Tensor,
+        weight: torch.Tensor,
+        *,
+        grouped_rows: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Mean-pool g=4 query/gate rows before the lossy FP8 quantization."""
+        from sglang.kernels.ops.attention.dsa.triton_kernel import act_quant
+        from sglang.kernels.ops.quantization.hadamard import hadamard_transform
+
+        q, _ = self.wq_b(q_lora)
+        q = q.view(-1, self.n_local_heads, self.head_dim)
+        fused_rope_inplace(
+            q[..., -self.rope_head_dim :],
+            None,
+            self.freqs_cis,
+            positions=positions,
+        )
+
+        group_size = self.pivot_group_size
+        grouped_q = (
+            q[:grouped_rows]
+            .view(-1, group_size, self.n_local_heads, self.head_dim)
+            .mean(dim=1, dtype=torch.float32)
+            .to(q.dtype)
+        )
+        grouped_weight = (
+            weight[:grouped_rows]
+            .view(-1, group_size, self.n_local_heads)
+            .mean(dim=1, dtype=torch.float32)
+            .to(weight.dtype)
+        )
+        if grouped_rows < q.shape[0]:
+            q = torch.cat((grouped_q, q[grouped_rows:]), dim=0)
+            weight = torch.cat((grouped_weight, weight[grouped_rows:]), dim=0)
+        else:
+            q = grouped_q
+            weight = grouped_weight
+
+        q = hadamard_transform(q, scale=self.head_dim**-0.5)
+        q_fp8, q_scale = act_quant(q.contiguous(), self.head_dim)
+        weights_out = weight.float().unsqueeze(-1) * self.weight_scale * q_scale
+        return q_fp8, weights_out
 
     def forward(
         self,

@@ -1300,6 +1300,9 @@ class Envs:
     SGLANG_OPT_USE_TILELANG_INDEXER = EnvBool(False)
     SGLANG_OPT_USE_AITER_INDEXER = EnvBool(False)
     SGLANG_OPT_DSV4_NONPAGED_INDEXER = EnvBool(True)
+    # Experimental PIVOT-Reuse for long-context DSV4 prefill. Unset/1 is off;
+    # only the fixed group size used by the experiment is supported.
+    SGLANG_DSV4_PIVOT_GROUP_SIZE = EnvInt(1)
     # Per-rank local query rows (after DP-attention sharding when enabled),
     # not request ISL.
     SGLANG_OPT_DSV4_NONPAGED_INDEXER_MIN_QUERY_TOKENS = EnvInt(8192)
